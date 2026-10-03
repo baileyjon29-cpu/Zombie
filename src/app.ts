@@ -1,6 +1,6 @@
 import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics';
 import {
-  BUILDINGS, BUILD_MENU, CAPS, DAY_LEN, GUARD_TRAIN, MAP_H, MAP_W, NIGHT_LEN, RES_ICON, TILE,
+  BUILDINGS, BUILD_MENU, CAPS, DAY_LEN, GUARD_TRAIN, MAP_H, MAP_W, NIGHT_LEN, TILE, UPGRADES,
   canAfford, costLabel, type BuildingKind,
 } from './game/config';
 import { Game, type GameEvent } from './game/game';
@@ -8,7 +8,8 @@ import { QUESTS } from './game/quests';
 import { Renderer, type Camera, type Overlay } from './game/render';
 import type { Building, ResNode, Unit, WorkJob } from './game/state';
 import { HQ_CX, HQ_CY, newGame, type Perks } from './game/world';
-import { Sfx } from './platform/audio';
+import { Music, Sfx } from './platform/audio';
+import { BUILDING_ICO, costHtml, ico } from './ui/icons';
 import { loadProfile, loadRun, saveProfile, saveRun, type Profile } from './platform/profile';
 import { PRODUCTS, createStore, type Store } from './platform/store';
 
@@ -20,11 +21,24 @@ const T = TILE;
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 const CAP = '<i class="cap"></i>';
 
+/** Shop artwork: stacks of caps for currency packs, icons for unlocks. */
+function productArt(id: string): string {
+  const stack = (n: number) => `<span class="capstack">${'<i class="cap"></i>'.repeat(n)}</span>`;
+  switch (id) {
+    case 'lasthaven.caps.small': return stack(1);
+    case 'lasthaven.caps.medium': return stack(3);
+    case 'lasthaven.caps.large': return stack(5);
+    case 'lasthaven.starter': return ico('crate', 'big');
+    default: return ico('ruin', 'big');
+  }
+}
+
 export class App {
   game!: Game;
   profile: Profile;
   store: Store;
   sfx = new Sfx();
+  music = new Music(this.sfx);
   renderer: Renderer;
   cam: Camera = { x: 0, y: 0, zoom: 1 };
 
@@ -36,12 +50,15 @@ export class App {
   pointer: { x: number; y: number } | null = null;
   ghost: Overlay['ghost'] = null;
   paused = true;
+  /** true once the player has left the title screen, so a run is worth saving */
+  started = false;
   speed = 1;
   shake = 0;
   private last = performance.now();
   private hudTimer = 0;
   private saveTimer = 0;
   private lastPaint: { tx: number; ty: number } | null = null;
+  private paintFailed = false;
   private html = new Map<string, string>();
   private ui: HTMLElement;
   private modalStack: string[] = [];
@@ -50,6 +67,7 @@ export class App {
     this.ui = root;
     this.profile = loadProfile();
     this.sfx.enabled = this.profile.sound;
+    this.music.enabled = this.profile.music;
     this.renderer = new Renderer(canvas);
     this.store = createStore(
       (id, tx) => this.grant(id, tx),
@@ -59,7 +77,12 @@ export class App {
     this.buildDom();
     this.bindInput();
     window.addEventListener('resize', () => { this.renderer.resize(); this.clampCam(); });
-    document.addEventListener('visibilitychange', () => { if (document.hidden) this.save(); });
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) return;
+      this.save();
+      // pause mid-game when the player leaves the app (phone call, home button…)
+      if (this.started && !this.modalStack.length && !this.game.s.gameOver) this.openMenu();
+    });
     window.addEventListener('pagehide', () => this.save());
     this.renderer.resize();
 
@@ -96,9 +119,13 @@ export class App {
     this.startGame(newGame((Math.random() * 2 ** 31) | 0, this.perks()));
     this.closeModals();
     this.paused = false;
+    this.started = true;
   }
 
-  save() { saveRun(this.game?.s ?? null); saveProfile(this.profile); }
+  save() {
+    if (this.started) saveRun(this.game?.s ?? null);
+    saveProfile(this.profile);
+  }
 
   // ================================================================== caps & purchases
   addCaps(n: number, reason: string) {
@@ -148,8 +175,13 @@ export class App {
     const raw = Math.min(0.1, (t - this.last) / 1000);
     this.last = t;
     if (!this.paused) {
-      const steps = this.speed;
-      for (let i = 0; i < steps; i++) this.game.update(Math.min(raw, 0.05));
+      // fixed 50 ms max sub-steps so slow frames catch up instead of running in slow motion
+      let remaining = raw * this.speed;
+      while (remaining > 1e-4) {
+        const step = Math.min(remaining, 0.05);
+        this.game.update(step);
+        remaining -= step;
+      }
     }
     this.handleEvents();
     this.shake = Math.max(0, this.shake - raw * 40);
@@ -183,7 +215,17 @@ export class App {
       switch (e.type) {
         case 'toast': this.toast(esc(e.text), e.tone); break;
         case 'sound': this.sfx.play(e.name); break;
-        case 'caps': this.addCaps(e.amount, e.reason); break;
+        case 'caps': this.addCaps(e.amount, e.reason); this.save(); break;
+        case 'quest':
+          if (!this.profile.claimedQuests.includes(e.index)) {
+            this.profile.claimedQuests.push(e.index);
+            this.addCaps(e.reward, `Goal complete: ${e.title}`);
+          } else {
+            this.toast(`🎯 Goal complete: ${esc(e.title)}`, 'good');
+          }
+          this.save();
+          break;
+        case 'victory': this.profile.wins++; saveProfile(this.profile); this.showVictory(); break;
         case 'shake': this.shake = Math.max(this.shake, e.amount); if (e.amount > 10) this.haptic('heavy'); break;
         case 'dusk': this.haptic('warning'); break;
         case 'dawn': this.recordBest(); break;
@@ -259,6 +301,7 @@ export class App {
         if (this.paints() && !this.paused) {
           painting = true;
           this.lastPaint = null;
+          this.paintFailed = false;
           this.paintAt(this.pointer.x, this.pointer.y);
         }
       } else if (pts.size === 2) {
@@ -355,7 +398,11 @@ export class App {
     }
     this.lastPaint = { tx, ty };
     if (placed) { this.sfx.play('place'); this.haptic('light'); }
-    if (failure && !placed) { this.toast(esc(failure), 'bad'); this.sfx.play('error'); }
+    if (failure && !placed && !this.paintFailed) {
+      this.paintFailed = true; // one warning per drag, not one per finger movement
+      this.toast(esc(failure), 'bad');
+      this.sfx.play('error');
+    }
   }
 
   private tap(wx: number, wy: number) {
@@ -445,29 +492,31 @@ export class App {
   private buildDom() {
     this.ui.innerHTML = `
       <div class="top">
-        <div class="daypill" id="daypill"><span id="dayicon">☀️</span><b id="daylabel">Day 1</b><div class="phase"><i id="phasebar"></i></div></div>
+        <div class="daypill" id="daypill"><span id="dayicon"></span><b id="daylabel">Day 1</b><div class="phase"><i id="phasebar"></i></div></div>
         <div class="res">
-          <span class="chip" title="Wood">${RES_ICON.wood}<b id="r-wood">0</b></span>
-          <span class="chip" title="Scrap">${RES_ICON.scrap}<b id="r-scrap">0</b></span>
-          <span class="chip" title="Food">${RES_ICON.food}<b id="r-food">0</b></span>
-          <span class="chip" title="Population">👥<b id="r-pop">0</b></span>
+          <span class="chip" title="Wood">${ico('wood')}<b id="r-wood">0</b></span>
+          <span class="chip" title="Scrap">${ico('scrap')}<b id="r-scrap">0</b></span>
+          <span class="chip" title="Food">${ico('food')}<b id="r-food">0</b></span>
+          <span class="chip" title="Population">${ico('pop')}<b id="r-pop">0</b></span>
         </div>
         <div class="topright">
-          <button class="chip caps" id="caps" data-a="shop">${CAP}<b id="r-caps">0</b><span class="plus">+</span></button>
-          <button class="iconbtn" id="speed" data-a="speed">▶</button>
-          <button class="iconbtn" data-a="menu">☰</button>
+          <button class="chip caps" id="caps" data-a="shop" aria-label="Shop">${CAP}<b id="r-caps">0</b><span class="plus">+</span></button>
+          <button class="iconbtn" id="speed" data-a="speed" aria-label="Game speed"></button>
+          <button class="iconbtn" data-a="menu" aria-label="Menu">${ico('menu')}</button>
         </div>
       </div>
+      <div class="boss hidden" id="boss"></div>
       <div class="quest" id="quest" data-a="quest"></div>
       <div class="toasts" id="toasts"></div>
       <div class="bottom">
+        <div class="event" id="event"></div>
         <div class="panel" id="panel"></div>
         <div class="tray" id="tray"></div>
         <div class="tabs" id="tabs">
-          <button data-a="tab" data-v="build">🔨<span>Build</span></button>
-          <button data-a="tab" data-v="jobs">👷<span>Jobs</span></button>
-          <button data-a="tab" data-v="powers">⚡<span>Powers</span></button>
-          <button data-a="home">🏠<span>Base</span></button>
+          <button data-a="tab" data-v="build">${ico('hammer')}<span>Build</span></button>
+          <button data-a="tab" data-v="jobs">${ico('worker')}<span>Jobs</span></button>
+          <button data-a="tab" data-v="powers">${ico('bolt')}<span>Powers</span></button>
+          <button data-a="home">${ico('home')}<span>Base</span></button>
         </div>
       </div>
       <div class="modal-root" id="modals"></div>
@@ -506,22 +555,55 @@ export class App {
     txt('r-pop', `${g.pop}/${g.popCap}`);
     txt('r-caps', String(this.profile.caps));
     txt('daylabel', s.isNight ? `Night ${s.day}` : `Day ${s.day}`);
-    txt('dayicon', s.isNight ? '🌙' : s.warned ? '🌇' : '☀️');
-    txt('speed', this.paused ? '⏸' : this.speed === 1 ? '▶' : '⏩');
+    this.set('dayicon', ico(s.isNight ? 'moon' : s.warned ? 'dusk' : 'sun'));
+    this.set('speed', ico(this.paused ? 'pause' : this.speed === 1 ? 'play' : 'fast'));
+    this.music.setMood(s.isNight ? 'night' : 'day', s.zombies.length);
     const frac = s.isNight ? s.phaseTime / NIGHT_LEN : s.phaseTime / DAY_LEN;
     const bar = document.getElementById('phasebar');
     if (bar) { bar.style.width = `${Math.min(100, frac * 100)}%`; bar.className = s.isNight ? 'night' : s.warned ? 'dusk' : ''; }
     document.getElementById('daypill')?.classList.toggle('night', s.isNight);
 
     const q = QUESTS[s.questIndex];
-    this.set('quest', q ? `<b>🎯 ${esc(q.title)}</b><span>${esc(q.hint)}</span><em>${CAP}${q.reward}</em>` : '');
-    document.getElementById('quest')?.classList.toggle('hidden', !q);
+    const claimed = q ? this.profile.claimedQuests.includes(s.questIndex) : false;
+    this.set('quest', q ? `<b>${ico('target')} ${esc(q.title)}</b><span>${esc(q.hint)}</span><em>${claimed ? '✓' : `${CAP}${q.reward}`}</em>` : '');
+    document.getElementById('quest')?.classList.toggle('hidden', !q || s.zombies.some((z) => z.kind === 'abomination'));
+
+    // boss health bar
+    const boss = s.zombies.find((z) => z.kind === 'abomination' && z.hp > 0);
+    const bossEl = document.getElementById('boss');
+    if (bossEl) {
+      bossEl.classList.toggle('hidden', !boss);
+      if (boss) this.set('boss', `<b>${ico('skull')} ABOMINATION</b><div class="bar"><i style="width:${(boss.hp / boss.maxHp) * 100}%"></i></div>`);
+    }
+    this.set('event', s.event && this.mode === 'none' ? this.eventHtml() : '');
 
     for (const b of this.ui.querySelectorAll<HTMLElement>('#tabs [data-a=tab]')) {
       b.classList.toggle('on', this.trayOpen && b.dataset.v === this.tab);
     }
     this.set('tray', this.trayOpen && this.mode === 'none' && !this.selected ? this.trayHtml() : '');
     this.set('panel', this.panelHtml());
+
+    // guide new players: pulse the control the current goal needs
+    for (const el of this.ui.querySelectorAll('.pulse')) el.classList.remove('pulse');
+    const focus = q?.focus?.(s);
+    if (focus && this.mode === 'none' && !this.selected && s.questIndex < 6) {
+      const target = this.trayOpen && this.tab === focus.tab
+        ? this.ui.querySelector(`#tray ${focus.sel}`)
+        : this.ui.querySelector(`#tabs [data-v=${focus.tab}]`);
+      target?.classList.add('pulse');
+    }
+  }
+
+  private eventHtml(): string {
+    const ev = this.game.s.event!;
+    if (ev.kind === 'trader') {
+      const ok = canAfford(this.game.s.res, ev.give);
+      return `<div class="evcard"><div class="info"><b>${ico('crate')} Wandering trader</b><p>Offers <span class="cost">${costHtml(ev.get)}</span> for your <span class="cost">${costHtml(ev.give)}</span></p></div>
+        <div class="acts"><button class="btn ghost" data-a="event-no">Pass</button><button class="btn gold" data-a="event-yes" ${ok ? '' : 'disabled'}>Trade</button></div></div>`;
+    }
+    const room = this.game.popCap - this.game.pop;
+    return `<div class="evcard"><div class="info"><b>${ico('pop')} Refugees at the gate</b><p>${ev.count} survivors ask to join.${room <= 0 ? ' You have no room. Build or upgrade houses.' : ''}</p></div>
+      <div class="acts"><button class="btn ghost" data-a="event-no">Turn away</button><button class="btn gold" data-a="event-yes" ${room > 0 ? '' : 'disabled'}>Let them in</button></div></div>`;
   }
 
   private trayHtml(): string {
@@ -533,34 +615,34 @@ export class App {
         const locked = s.day < d.unlockDay;
         const afford = canAfford(s.res, d.cost);
         return `<button class="card ${afford && !locked ? '' : 'dim'}" data-a="build" data-v="${k}">
-          <span class="ic">${d.icon}</span><span class="nm">${d.name}</span>
-          <span class="cost">${locked ? `🔒 Day ${d.unlockDay}` : costLabel(d.cost)}</span></button>`;
+          <span class="ic">${ico(BUILDING_ICO[k])}</span><span class="nm">${d.name}</span>
+          <span class="cost">${locked ? `${ico('lock')} Day ${d.unlockDay}` : costHtml(d.cost)}</span></button>`;
       }).join('')}</div>`;
     }
     if (this.tab === 'jobs') {
       const idle = g.workers.length - (s.jobs.wood + s.jobs.scrap + s.jobs.food);
       const row = (j: WorkJob, icon: string, name: string, note: string) => `
-        <div class="job"><span class="ic">${icon}</span><span class="nm">${name}<small>${note}</small></span>
+        <div class="job"><span class="ic">${ico(icon)}</span><span class="nm">${name}<small>${note}</small></span>
           <button class="step" data-a="job" data-v="${j}:-1" ${s.jobs[j] ? '' : 'disabled'}>−</button>
           <b>${s.jobs[j]}</b>
           <button class="step" data-a="job" data-v="${j}:1" ${idle > 0 ? '' : 'disabled'}>+</button></div>`;
-      const farms = s.buildings.filter((b) => b.kind === 'farm' && b.built >= 1).length;
+      const slots = s.buildings.filter((b) => b.kind === 'farm' && b.built >= 1).reduce((n, b) => n + g.farmSlots(b), 0);
       return `<div class="jobs">
-        ${row('wood', '🪓', 'Lumberjacks', 'Chop trees')}
-        ${row('scrap', '🔧', 'Salvagers', 'Strip wrecks')}
-        ${row('food', '🌽', 'Farmers', `${farms * 2} farm slots`)}
-        <div class="jobnote">🧍 ${idle} idle · 🔫 ${s.units.filter((u) => u.kind !== 'worker').length} armed · Everyone eats ${RES_ICON.food}3 at dawn</div>
+        ${row('wood', 'axe', 'Lumberjacks', 'Chop trees')}
+        ${row('scrap', 'wrench', 'Salvagers', 'Strip wrecks')}
+        ${row('food', 'farm', 'Farmers', `${slots} farm slot${slots === 1 ? '' : 's'}`)}
+        <div class="jobnote">${ico('idle')} ${idle} idle · ${ico('gun')} ${s.units.filter((u) => u.kind !== 'worker').length} armed · Everyone eats ${ico('food')}3 at dawn</div>
       </div>`;
     }
     const repair = g.repairAllCost();
     const hasRepair = Object.keys(repair).length > 0;
     const power = (a: string, icon: string, name: string, desc: string, cost: string, dis = false) =>
-      `<button class="card power" data-a="${a}" ${dis ? 'disabled' : ''}><span class="ic">${icon}</span><span class="nm">${name}</span><span class="desc">${desc}</span><span class="cost">${cost}</span></button>`;
+      `<button class="card power" data-a="${a}" ${dis ? 'disabled' : ''}><span class="ic">${ico(icon)}</span><span class="nm">${name}</span><span class="desc">${desc}</span><span class="cost">${cost}</span></button>`;
     return `<div class="scroller">
-      ${power('drop', '📦', 'Supply Drop', '+120🪵 +90⚙️ +60🥫', `${CAP}${CAPS.supplyDrop}`)}
-      ${power('strike', '💥', 'Airstrike', 'Wipe out a horde', `${CAP}${CAPS.airstrike}`)}
-      ${power('merc', '🎖️', 'Mercenary', 'Elite gunner joins', `${CAP}${CAPS.mercenary}`)}
-      ${power('repairall', '🔧', 'Repair All', 'Fix every structure', hasRepair ? costLabel(repair) : 'All good', !hasRepair)}
+      ${power('drop', 'crate', 'Supply Drop', 'Wood, scrap & food', `${CAP}${CAPS.supplyDrop}`)}
+      ${power('strike', 'blast', 'Airstrike', 'Wipe out a horde', `${CAP}${CAPS.airstrike}`)}
+      ${power('merc', 'medal', 'Mercenary', 'Elite gunner joins', `${CAP}${CAPS.mercenary}`)}
+      ${power('repairall', 'repair', 'Repair All', 'Fix every structure', hasRepair ? costHtml(repair) : 'All good', !hasRepair)}
     </div>`;
   }
 
@@ -569,7 +651,7 @@ export class App {
     const s = g.s;
     if (this.mode !== 'none') {
       const msg: Record<Exclude<Mode, 'none'>, string> = {
-        build: `${BUILDINGS[this.buildKind].icon} <b>${BUILDINGS[this.buildKind].name}</b> ${costLabel(BUILDINGS[this.buildKind].cost)}<br><small>${this.paints() ? 'Drag to paint · two fingers to move the map' : 'Tap the map to place'}</small>`,
+        build: `${ico(BUILDING_ICO[this.buildKind])} <b>${BUILDINGS[this.buildKind].name}</b> <span class="cost">${costHtml(BUILDINGS[this.buildKind].cost)}</span><br><small>${this.paints() ? 'Drag to paint · two fingers to move the map' : 'Tap the map to place'}</small>`,
         post: '📍 Tap where this guard should stand',
         patrol: '🔁 Tap the far end of the patrol route',
         airstrike: `💥 Tap the target · ${CAP}${CAPS.airstrike}`,
@@ -584,18 +666,26 @@ export class App {
       if (!b) { this.selected = null; return ''; }
       const d = BUILDINGS[b.kind];
       const acts: string[] = [];
-      let info = `<b>${d.icon} ${d.name}</b>${hp(b.hp, b.maxHp)}<p>${d.desc}</p>`;
+      const lvlName = b.level > 1 ? UPGRADES[b.kind]?.[b.level - 2]?.name : undefined;
+      const title = `${ico(BUILDING_ICO[b.kind])} ${lvlName ?? d.name}${UPGRADES[b.kind] && b.kind !== 'wall' ? ` <small class="lvl">Lv ${b.level}</small>` : ''}`;
+      let info = `<b>${title}</b>${hp(b.hp, b.maxHp)}<p class="desc">${d.desc}</p>`;
       if (b.built < 1) {
-        info = `<b>${d.icon} ${d.name}</b><p>Under construction… ${Math.floor(b.built * 100)}%</p>`;
+        info = `<b>${title}</b><p>Under construction… ${Math.floor(b.built * 100)}%</p>`;
         acts.push(`<button class="btn gold" data-a="finish">Finish now ${CAP}${g.finishCost(b)}</button>`);
       } else {
         if (b.kind === 'barracks') {
           info += b.trainQueue ? `<p>Training ${b.trainQueue} guard(s)…</p>` : '';
-          acts.push(`<button class="btn" data-a="train">Train Guard ${costLabel(GUARD_TRAIN.cost)}</button>`);
+          acts.push(`<button class="btn" data-a="train">Train Guard <span class="cost">${costHtml(GUARD_TRAIN.cost)}</span></button>`);
         }
         if (b.kind === 'hq') info += `<p>${g.workers.filter((u) => u.state === 'sheltered').length} sheltering inside · ${s.kills} zombies killed</p>`;
+        const up = g.nextUpgrade(b);
+        if (up) {
+          const locked = s.day < up.unlockDay;
+          info += `<p class="upnote">${ico('upgrade')} <b>${up.name}</b>: ${up.desc}</p>`;
+          acts.push(`<button class="btn gold" data-a="upgrade" ${locked || !canAfford(s.res, up.cost) ? 'disabled' : ''}>${locked ? `${ico('lock')} Day ${up.unlockDay}` : `Upgrade <span class="cost">${costHtml(up.cost)}</span>`}</button>`);
+        }
         const rc = g.repairCost(b);
-        if (Object.keys(rc).length) acts.push(`<button class="btn" data-a="repair">Repair ${costLabel(rc)}</button>`);
+        if (Object.keys(rc).length) acts.push(`<button class="btn" data-a="repair">Repair <span class="cost">${costHtml(rc)}</span></button>`);
       }
       if (b.kind !== 'hq') acts.push(`<button class="btn ghost" data-a="demolish">Demolish</button>`);
       return `<div class="sel"><div class="info">${info}</div><div class="acts">${acts.join('')}<button class="x" data-a="deselect">✕</button></div></div>`;
@@ -609,22 +699,22 @@ export class App {
           toFarm: 'Walking to the farm', farming: 'Farming', shelter: 'Running for shelter', expedition: 'On a scavenging run',
           searching: 'Searching the ruins', home: 'Returning with loot',
         };
-        return `<div class="sel"><div class="info"><b>🧍 Survivor</b>${hp(u.hp, u.maxHp)}<p>${doing[u.state] ?? ''}</p></div><div class="acts"><button class="btn" data-a="tab" data-v="jobs">Jobs</button><button class="x" data-a="deselect">✕</button></div></div>`;
+        return `<div class="sel"><div class="info"><b>${ico('pop')} Survivor</b>${hp(u.hp, u.maxHp)}<p>${doing[u.state] ?? ''}</p></div><div class="acts"><button class="btn" data-a="tab" data-v="jobs">Jobs</button><button class="x" data-a="deselect">✕</button></div></div>`;
       }
-      const name = u.kind === 'merc' ? '🎖️ Mercenary' : '🔫 Guard';
+      const name = u.kind === 'merc' ? `${ico('medal')} Mercenary` : `${ico('gun')} Guard`;
       const status = u.patrol ? 'Patrolling' : 'Holding position';
       return `<div class="sel"><div class="info"><b>${name}</b>${hp(u.hp, u.maxHp)}<p>${status}</p></div><div class="acts">
-        <button class="btn" data-a="post">📍 Move</button><button class="btn" data-a="patrol">🔁 Patrol</button><button class="x" data-a="deselect">✕</button></div></div>`;
+        <button class="btn" data-a="post">Move</button><button class="btn" data-a="patrol">Patrol</button><button class="x" data-a="deselect">✕</button></div></div>`;
     }
     const n = g.nodeById.get(sel.id);
     if (!n) { this.selected = null; return ''; }
     if (n.kind === 'ruin') {
       const busy = g.s.units.some((u) => (u.state === 'expedition' || u.state === 'searching') && u.targetId === n.id);
       const far = Math.round(Math.hypot(n.tx - HQ_CX, n.ty - HQ_CY));
-      return `<div class="sel"><div class="info"><b>🏚 Ruins</b><p>${n.amount ? `${n.amount} search${n.amount > 1 ? 'es' : ''} left · ${far} tiles from home. Farther ruins hide better loot — and more danger.` : 'Picked clean.'}</p></div>
-        <div class="acts">${n.amount ? `<button class="btn gold" data-a="scavenge" ${busy || s.isNight ? 'disabled' : ''}>${busy ? 'Scavenger en route' : s.isNight ? 'Wait for daylight' : '🎒 Send scavenger'}</button>` : ''}<button class="x" data-a="deselect">✕</button></div></div>`;
+      return `<div class="sel"><div class="info"><b>${ico('ruin')} ${n.max === 1 ? 'Supply cache' : 'Ruins'}</b><p>${n.amount ? `${n.amount} search${n.amount > 1 ? 'es' : ''} left · ${far} tiles from home. Farther ruins hide better loot — and more danger.` : 'Picked clean.'}</p></div>
+        <div class="acts">${n.amount ? `<button class="btn gold" data-a="scavenge" ${busy || s.isNight ? 'disabled' : ''}>${busy ? 'Scavenger en route' : s.isNight ? 'Wait for daylight' : 'Send scavenger'}</button>` : ''}<button class="x" data-a="deselect">✕</button></div></div>`;
     }
-    const label = n.kind === 'tree' ? `🌲 Tree · ${n.amount} wood` : `🚗 Wreck · ${n.amount} scrap`;
+    const label = n.kind === 'tree' ? `${ico('wood')} Tree · ${n.amount} wood` : `${ico('scrap')} Wreck · ${n.amount} scrap`;
     return `<div class="sel"><div class="info"><b>${label}</b><p>Assign ${n.kind === 'tree' ? 'Lumberjacks' : 'Salvagers'} in Jobs to harvest.</p></div><div class="acts"><button class="btn" data-a="tab" data-v="jobs">Jobs</button><button class="x" data-a="deselect">✕</button></div></div>`;
   }
 
@@ -666,6 +756,22 @@ export class App {
         break;
       }
       case 'repair': { const b = this.selectedBuilding(); if (b) g.repair(b); break; }
+      case 'upgrade': {
+        const b = this.selectedBuilding();
+        if (!b) break;
+        const err = g.upgrade(b);
+        if (err) { this.toast(esc(err), 'bad'); this.sfx.play('error'); } else { this.haptic('success'); this.toast(`${ico('upgrade')} Upgraded to ${esc(UPGRADES[b.kind === 'steelwall' ? 'wall' : b.kind]![Math.max(0, b.level - 2)]?.name ?? 'Steel Wall')}`, 'good'); }
+        break;
+      }
+      case 'event-yes': { const err = g.acceptEvent(); if (err) { this.toast(esc(err), 'bad'); this.sfx.play('error'); } break; }
+      case 'event-no': g.declineEvent(); break;
+      case 'music':
+        this.profile.music = !this.profile.music;
+        this.music.enabled = this.profile.music;
+        saveProfile(this.profile);
+        this.openMenu(true);
+        break;
+      case 'endless': this.closeModals(); this.paused = false; break;
       case 'demolish': {
         const b = this.selectedBuilding();
         if (!b) break;
@@ -699,7 +805,7 @@ export class App {
       case 'close': this.closeModal(); break;
       case 'buy': void this.buy(v); break;
       case 'restore': void this.restore(); break;
-      case 'continue': this.closeModals(); this.paused = false; this.profile.seenIntro = true; saveProfile(this.profile); break;
+      case 'continue': this.closeModals(); this.paused = false; this.started = true; this.profile.seenIntro = true; saveProfile(this.profile); break;
       case 'newgame':
         if (v === 'confirm') {
           void this.confirm('Start over?', 'Your current settlement will be abandoned. Caps and purchases are kept.', 'New game').then((ok) => ok && this.newRun());
@@ -816,7 +922,8 @@ export class App {
       <div class="col">
         <button class="btn gold big" data-a="close">Resume</button>
         <button class="btn" data-a="howto">How to play</button>
-        <button class="btn" data-a="sound">Sound: ${p.sound ? 'On' : 'Off'}</button>
+        <button class="btn" data-a="music">Music: ${p.music ? 'On' : 'Off'}</button>
+        <button class="btn" data-a="sound">Sound effects: ${p.sound ? 'On' : 'Off'}</button>
         <button class="btn" data-a="haptics">Haptics: ${p.haptics ? 'On' : 'Off'}</button>
         <button class="btn" data-a="restore">Restore Purchases</button>
         <button class="btn ghost" data-a="newgame" data-v="confirm">New Game</button>
@@ -843,7 +950,7 @@ export class App {
         ${PRODUCTS.map((p) => `
           <div class="product ${owned(p.id) ? 'owned' : ''}">
             ${p.badge ? `<span class="badge">${p.badge}</span>` : ''}
-            <span class="pic">${p.icon}</span>
+            <span class="pic">${productArt(p.id)}</span>
             <div class="pinfo"><b>${esc(p.title)}</b><small>${esc(p.desc)}</small></div>
             ${owned(p.id) ? '<span class="ownedtag">Owned ✓</span>' : `<button class="btn gold" data-a="buy" data-v="${p.id}">${esc(this.store.price(p.id))}</button>`}
           </div>`).join('')}
@@ -877,6 +984,22 @@ export class App {
       this.toast(`⚠️ ${esc((e as Error).message)}`, 'bad');
     }
     this.refreshShop();
+  }
+
+  showVictory() {
+    const s = this.game.s;
+    this.sfx.play('dawn');
+    this.modal('victory', `
+      <div class="over win">
+        <div class="convoy">${ico('shield', 'big')}</div>
+        <h1>Rescue has arrived</h1>
+        <p>Headlights on the horizon. After <b>${s.nightsSurvived}</b> nights and <b>${s.kills}</b> zombies, a military convoy reaches the Haven. Your people are going to make it.</p>
+        <p class="best">+100 Caps reward</p>
+        <div class="col">
+          <button class="btn gold big" data-a="endless">Keep defending (endless mode)</button>
+          <button class="btn big" data-a="newgame" data-v="confirm">Start a new settlement</button>
+        </div>
+      </div>`, 'small');
   }
 
   showGameOver() {

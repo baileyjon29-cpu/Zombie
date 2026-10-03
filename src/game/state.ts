@@ -30,6 +30,8 @@ export interface Building {
   aim: number;
   trainQueue: number;
   trainTimer: number;
+  /** upgrade level, starting at 1 (missing in saves from v1.0) */
+  level: number;
 }
 
 export interface Unit {
@@ -66,6 +68,9 @@ export interface Zombie {
   chaseId: number;
   think: number;
   dir: number;
+  /** building a spitter is lobbing acid at */
+  siegeId?: number;
+  step?: number;
 }
 
 export type NodeKind = 'tree' | 'wreck' | 'ruin';
@@ -81,7 +86,7 @@ export interface ResNode {
 }
 
 export interface Fx {
-  kind: 'tracer' | 'blood' | 'text' | 'boom' | 'dust' | 'drop';
+  kind: 'tracer' | 'blood' | 'text' | 'boom' | 'dust' | 'drop' | 'corpse' | 'spark' | 'acid' | 'pop';
   x: number;
   y: number;
   x2: number;
@@ -97,6 +102,10 @@ export interface SpawnOrder {
   at: number; // seconds into the night
   edge: number; // 0=N 1=E 2=S 3=W
 }
+
+export type DayEvent =
+  | { kind: 'trader'; give: Partial<Record<ResKey, number>>; get: Partial<Record<ResKey, number>> }
+  | { kind: 'refugees'; count: number };
 
 export interface GameState {
   version: 1;
@@ -125,7 +134,11 @@ export interface GameState {
   explored: number[];
   gameOver: boolean;
   questIndex: number;
-  stats: { wallsBuilt: number; expeditions: number; patrols: number; guardsTrained: number };
+  stats: { wallsBuilt: number; expeditions: number; patrols: number; guardsTrained: number; upgrades?: number };
+  /** optional fields were added after v1.0; Game's constructor fills defaults for old saves */
+  event?: DayEvent | null;
+  eventDay?: number;
+  victory?: boolean;
 }
 
 export const EDGE_NAMES = ['NORTH', 'EAST', 'SOUTH', 'WEST'];

@@ -24,14 +24,17 @@ class MinHeap {
     while (c > 0) {
       const par = (c - 1) >> 1;
       if (b[par] <= b[c]) break;
-      [a[par], a[c]] = [a[c], a[par]];
-      [b[par], b[c]] = [b[c], b[par]];
+      let t = a[par]; a[par] = a[c]; a[c] = t;
+      t = b[par]; b[par] = b[c]; b[c] = t;
       c = par;
     }
   }
-  pop(): [number, number] {
+  /** priority of the most recently popped entry */
+  lastPri = 0;
+  pop(): number {
     const a = this.idx, b = this.pri;
-    const top: [number, number] = [a[0], b[0]];
+    const top = a[0];
+    this.lastPri = b[0];
     const li = a.pop()!, lp = b.pop()!;
     if (a.length) {
       a[0] = li; b[0] = lp;
@@ -42,8 +45,8 @@ class MinHeap {
         if (l < a.length && b[l] < b[m]) m = l;
         if (r < a.length && b[r] < b[m]) m = r;
         if (m === c) break;
-        [a[m], a[c]] = [a[c], a[m]];
-        [b[m], b[c]] = [b[c], b[m]];
+        let t = a[m]; a[m] = a[c]; a[c] = t;
+        t = b[m]; b[m] = b[c]; b[c] = t;
         c = m;
       }
     }
@@ -73,8 +76,8 @@ export function enterCost(occ: Int32Array, byId: Map<number, Building>, i: numbe
   return 1 + b.hp / 8;
 }
 
-export function computeFlow(buildings: Building[], occ: Int32Array, byId: Map<number, Building>): Float32Array {
-  const dist = new Float32Array(MAP_W * MAP_H).fill(Infinity);
+export function computeFlow(buildings: Building[], occ: Int32Array, byId: Map<number, Building>, reuse?: Float32Array): Float32Array {
+  const dist = (reuse ?? new Float32Array(MAP_W * MAP_H)).fill(Infinity);
   const heap = new MinHeap();
   for (const b of buildings) {
     if (!BUILDINGS[b.kind].target || b.hp <= 0) continue;
@@ -88,7 +91,8 @@ export function computeFlow(buildings: Building[], occ: Int32Array, byId: Map<nu
   const solidAt = (x: number, y: number) => isSolid(byId.get(occ[y * MAP_W + x]));
 
   while (heap.size) {
-    const [cur, d] = heap.pop();
+    const cur = heap.pop();
+    const d = heap.lastPri;
     if (d > dist[cur]) continue;
     const cx = cur % MAP_W;
     const cy = (cur / MAP_W) | 0;

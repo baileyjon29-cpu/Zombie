@@ -83,7 +83,37 @@ export const POP_HOUSE = 4;
 export const FARM_SLOTS = 2;
 export const FOOD_PER_PERSON_DAWN = 3;
 
-export const TOWER = { range: 6.5, dmg: 14, cooldown: 0.9 };
+export interface GunStats { range: number; dmg: number; cooldown: number }
+/** Watchtower stats per level (index 0 = level 1). */
+export const TOWER_LEVELS: GunStats[] = [
+  { range: 6.5, dmg: 14, cooldown: 0.9 },
+  { range: 7.5, dmg: 22, cooldown: 0.8 },
+  { range: 8.5, dmg: 20, cooldown: 0.4 },
+];
+export const TOWER = TOWER_LEVELS[0];
+/** HQ per level: max HP, bonus population, rooftop sniper. */
+export const HQ_LEVELS: { hp: number; pop: number; gun: GunStats | null }[] = [
+  { hp: 1500, pop: 0, gun: null },
+  { hp: 2500, pop: 4, gun: { range: 6, dmg: 14, cooldown: 1 } },
+  { hp: 4000, pop: 8, gun: { range: 7.5, dmg: 24, cooldown: 0.75 } },
+];
+export const HOUSE_POP = [4, 7];
+
+export interface UpgradeDef { cost: Cost; unlockDay: number; name: string; desc: string }
+/** Upgrade path per building. Entry i upgrades from level i+1 to level i+2. */
+export const UPGRADES: Partial<Record<BuildingKind, UpgradeDef[]>> = {
+  tower: [
+    { cost: { wood: 40, scrap: 60 }, unlockDay: 2, name: 'Rifle Nest', desc: 'Longer range, heavier rounds' },
+    { cost: { wood: 60, scrap: 120 }, unlockDay: 5, name: 'Machine Gun Nest', desc: 'Rapid fire, longest range' },
+  ],
+  hq: [
+    { cost: { wood: 150, scrap: 100 }, unlockDay: 3, name: 'Fortified HQ', desc: '+1000 HP, +4 population, rooftop sniper' },
+    { cost: { wood: 250, scrap: 250 }, unlockDay: 7, name: 'Stronghold', desc: '+1500 HP, +4 population, deadlier sniper' },
+  ],
+  house: [{ cost: { wood: 50, scrap: 30 }, unlockDay: 2, name: 'Bunkhouse', desc: 'Room for 7 instead of 4' }],
+  farm: [{ cost: { wood: 40, scrap: 20 }, unlockDay: 2, name: 'Irrigated Farm', desc: 'Room for a 3rd farmer' }],
+  wall: [{ cost: { scrap: 10 }, unlockDay: 3, name: 'Steel Plating', desc: 'Reinforce into a Steel Wall' }],
+};
 export const TRAP = { dps: 18, slow: 0.5, wear: 5 };
 
 export type UnitKind = 'worker' | 'guard' | 'merc';
@@ -95,11 +125,15 @@ export const UNITS: Record<UnitKind, { hp: number; speed: number; range: number;
 
 export const GUARD_TRAIN = { cost: { food: 20, scrap: 15 } as Cost, time: 8 };
 
-export type ZombieKind = 'walker' | 'runner' | 'brute';
-export const ZOMBIES: Record<ZombieKind, { hp: number; speed: number; dmg: number; radius: number; bounty: number }> = {
-  walker: { hp: 40, speed: 0.8, dmg: 9, radius: 0.32, bounty: 0 },
-  runner: { hp: 26, speed: 1.9, dmg: 6, radius: 0.27, bounty: 0 },
-  brute: { hp: 240, speed: 0.55, dmg: 30, radius: 0.48, bounty: 1 },
+export type ZombieKind = 'walker' | 'runner' | 'brute' | 'spitter' | 'abomination';
+export const ZOMBIES: Record<ZombieKind, { name: string; hp: number; speed: number; dmg: number; radius: number; bounty: number; range: number; wallMult: number }> = {
+  walker: { name: 'Walker', hp: 40, speed: 0.8, dmg: 9, radius: 0.32, bounty: 0, range: 0, wallMult: 1 },
+  runner: { name: 'Runner', hp: 26, speed: 1.9, dmg: 6, radius: 0.27, bounty: 0, range: 0, wallMult: 1 },
+  brute: { name: 'Brute', hp: 240, speed: 0.55, dmg: 30, radius: 0.48, bounty: 1, range: 0, wallMult: 1.5 },
+  /** spits acid at walls and people from a distance */
+  spitter: { name: 'Spitter', hp: 34, speed: 0.85, dmg: 13, radius: 0.3, bounty: 0, range: 3.2, wallMult: 1 },
+  /** Blood Moon boss */
+  abomination: { name: 'Abomination', hp: 1100, speed: 0.45, dmg: 70, radius: 0.8, bounty: 10, range: 0, wallMult: 2 },
 };
 export const ZOMBIE_AGGRO = 5; // tiles: chase humans within this range
 
@@ -110,6 +144,11 @@ export const GATHER = {
 };
 
 export const RUIN = { searches: 3, searchTime: 6 };
+
+/** Survive this many nights and the rescue convoy arrives (the game continues in endless mode). */
+export const RESCUE_NIGHT = 20;
+/** Daytime event fires this many seconds after dawn, from Day 2 on. */
+export const EVENT_AT = 28;
 
 /** Premium currency is "Caps" — bottle caps, the currency of the wasteland. */
 export const CAPS = {
@@ -137,6 +176,8 @@ export function hordeSize(day: number): number {
 }
 
 export function hordeMix(day: number, r: number): ZombieKind {
+  const spitChance = day >= 6 ? Math.min(0.06 + (day - 6) * 0.01, 0.15) : 0;
+  if (r > 1 - spitChance) return 'spitter';
   const bruteChance = day >= 4 ? Math.min(0.06 + (day - 4) * 0.015, 0.2) : 0;
   const runnerChance = day >= 2 ? Math.min(0.15 + (day - 2) * 0.03, 0.4) : 0;
   if (r < bruteChance) return 'brute';

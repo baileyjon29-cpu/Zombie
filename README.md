@@ -16,10 +16,19 @@ Last Haven is a zombie-apocalypse base builder for iPhone and iPad: part farm ga
 | 🌙 **Night** (~55 s) | Survivors shelter inside the HQ. Zombies follow a flow field toward your buildings, look for gaps, and chew through the weakest wall. Towers, guards, patrols and spike traps hold the line. |
 | 🥫 **Dawn** | Everyone eats. A well-fed Haven attracts new survivors. You earn Caps for every night survived. |
 
-Every 5th night is a 🩸 **Blood Moon**: a bigger horde with extra Brutes.
+Every 5th night is a 🩸 **Blood Moon**: a bigger horde led by an **Abomination** boss.
+
+From Day 2, daytime brings **events**: a wandering trader, refugees asking to join, or radio chatter about a supply cache.
+
+**Goal:** survive 20 nights and the rescue convoy arrives. After that you can keep playing in endless mode.
 
 ### Buildings
 Wood Wall · Steel Wall (Day 3) · Watchtower · House (+4 pop) · Farm · Barracks (train guards) · Spike Trap (Day 2)
+
+### Upgrades
+- **Watchtower** → Rifle Nest → Machine Gun Nest
+- **HQ** → Fortified HQ (rooftop sniper, +4 pop) → Stronghold
+- **House** → Bunkhouse (7 pop) · **Farm** → Irrigated Farm (3 farmers) · **Wood Wall** → Steel Wall
 
 ### Units
 - **Survivors**: gather resources, farm and scavenge. They hide at night.
@@ -30,9 +39,11 @@ Wood Wall · Steel Wall (Day 3) · Watchtower · House (+4 pop) · Farm · Barra
 - **Walker**: slow and steady
 - **Runner**: fast and fragile (from Day 2)
 - **Brute**: a tank that wrecks walls (from Day 4)
+- **Spitter**: lobs acid at walls and people from range (from Day 6)
+- **Abomination**: the Blood Moon boss, with a health bar and a Caps bounty
 
 ### Goals
-Twelve guided goals teach the game ("Hold the line", "Scavenger run", "On patrol"…) and pay out Caps.
+Seventeen guided goals teach the game. The control each early goal needs pulses. Each goal pays its Caps once per player, not once per run ("Hold the line", "Scavenger run", "On patrol"…) and pay out Caps.
 
 ## Monetization (in-app purchases)
 
@@ -52,7 +63,8 @@ On iOS, purchases go through Apple StoreKit via [`cordova-plugin-purchase`](http
 
 ## Tech
 
-- **TypeScript + HTML5 Canvas**: no game engine, no art files. Everything is drawn procedurally, and sound effects are synthesized with WebAudio.
+- **TypeScript + HTML5 Canvas**: no game engine, no art files. Everything is drawn procedurally, the UI uses a custom SVG icon set, and the music and sound effects are synthesized with WebAudio.
+- Player data (purchased Caps, unlocks) is stored in iOS native storage via `@capacitor/preferences`, so iOS can't purge it.
 - **Vite** for development and builds
 - **Capacitor 8** wraps the web game as a native iOS app (`ios/`)
 - **Vitest** for the simulation tests

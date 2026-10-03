@@ -116,7 +116,10 @@ To change prices or add products later, edit `PRODUCTS` in `src/platform/store.t
 > • Build a settlement: houses, farms, barracks and watchtowers
 > • Paint walls with a swipe and watch zombies hunt for the weak spot
 > • Train guards, set patrol routes and plan your killzones
-> • Survive escalating hordes — Runners, Brutes and the Blood Moon
+> • Upgrade towers into machine-gun nests and your HQ into a Stronghold
+> • Survive escalating hordes — Runners, Spitters, Brutes and the Blood Moon Abomination
+> • Traders, refugees and supply caches every day
+> • Hold out for 20 nights until the rescue convoy arrives
 > • Dynamic day/night cycle with real-time lighting
 > • Play offline, anytime
 >

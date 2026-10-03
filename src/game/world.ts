@@ -71,7 +71,8 @@ export function newGame(seed: number, perks: Perks = NO_PERKS): GameState {
     terrain: new Array(MAP_W * MAP_H).fill(0),
     explored: new Array(MAP_W * MAP_H).fill(0),
     gameOver: false, questIndex: 0,
-    stats: { wallsBuilt: 0, expeditions: 0, patrols: 0, guardsTrained: 0 },
+    stats: { wallsBuilt: 0, expeditions: 0, patrols: 0, guardsTrained: 0, upgrades: 0 },
+    event: null, eventDay: 0, victory: false,
   };
 
   // --- terrain ---
@@ -91,7 +92,7 @@ export function newGame(seed: number, perks: Perks = NO_PERKS): GameState {
   const hqDef = BUILDINGS.hq;
   s.buildings.push({
     id: s.nextId++, kind: 'hq', tx: HQ_TX, ty: HQ_TY, size: hqDef.size, hp: hqDef.hp, maxHp: hqDef.hp,
-    built: 1, cd: 0, aim: 0, trainQueue: 0, trainTimer: 0,
+    built: 1, cd: 0, aim: 0, trainQueue: 0, trainTimer: 0, level: 1,
   });
 
   const taken = new Set<number>();

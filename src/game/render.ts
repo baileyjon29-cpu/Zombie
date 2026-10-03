@@ -1,4 +1,4 @@
-import { BUILDINGS, DAY_LEN, DUSK_WARNING, MAP_H, MAP_W, NIGHT_LEN, TILE, ZOMBIES, type BuildingKind } from './config';
+import { BUILDINGS, DAY_LEN, DUSK_WARNING, MAP_H, MAP_W, NIGHT_LEN, TILE, TOWER_LEVELS, ZOMBIES, type BuildingKind, type ZombieKind } from './config';
 import type { Game } from './game';
 import type { Building, ResNode, Unit, Zombie } from './state';
 import { HQ_CX, HQ_CY } from './world';
@@ -16,6 +16,9 @@ export interface Overlay {
 
 const T = TILE;
 const GRASS = ['#3d4a2c', '#43512f', '#4a5734'];
+const ZCOL: Record<ZombieKind, string> = {
+  walker: '#6b8f4e', runner: '#93a85c', brute: '#5e4f6e', spitter: '#8aa33a', abomination: '#7a4a5e',
+};
 
 function shade(hex: string, amt: number): string {
   const n = parseInt(hex.slice(1), 16);
@@ -213,6 +216,40 @@ export class Renderer {
           ctx.arc((f.x + Math.cos(a) * p * 0.8) * T, (f.y + Math.sin(a) * p * 0.8) * T, (0.2 + p * 0.3) * T, 0, Math.PI * 2);
           ctx.fill();
         }
+      } else if (f.kind === 'corpse') {
+        this.drawZombieBody(f.x, f.y, f.text as ZombieKind, f.x2, 0, p < 0.08, Math.max(0, 1 - p) * 0.999);
+      } else if (f.kind === 'spark') {
+        ctx.fillStyle = `rgba(255,${200 - p * 150},80,${1 - p})`;
+        for (let i = 0; i < 4; i++) {
+          const a = f.x2 + Math.PI + (i - 1.5) * 0.5;
+          const d = (4 + p * 14) * (0.7 + (i % 2) * 0.5);
+          ctx.fillRect(f.x * T + Math.cos(a) * d - 1, f.y * T + Math.sin(a) * d - 1, 2.5, 2.5);
+        }
+        ctx.fillStyle = `rgba(110,10,14,${0.8 * (1 - p)})`;
+        for (let i = 0; i < 3; i++) {
+          const a = f.x2 + (i - 1) * 0.6;
+          ctx.beginPath(); ctx.arc(f.x * T + Math.cos(a) * p * 16, f.y * T + Math.sin(a) * p * 16, 2.2, 0, Math.PI * 2); ctx.fill();
+        }
+      } else if (f.kind === 'acid') {
+        const px = (f.x + (f.x2 - f.x) * p) * T, py = (f.y + (f.y2 - f.y) * p) * T - Math.sin(p * Math.PI) * 18;
+        ctx.fillStyle = '#c8e04a';
+        ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = 'rgba(200,224,74,0.35)';
+        ctx.beginPath(); ctx.arc(px, py, 8, 0, Math.PI * 2); ctx.fill();
+        if (p > 0.85) {
+          ctx.fillStyle = `rgba(170,210,40,${(1 - p) * 4})`;
+          ctx.beginPath(); ctx.arc(f.x2 * T, f.y2 * T, 10, 0, Math.PI * 2); ctx.fill();
+        }
+      } else if (f.kind === 'pop') {
+        ctx.strokeStyle = `rgba(242,201,76,${1 - p})`;
+        ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.arc(f.x * T, f.y * T, (f.x2 * 0.6 + p * 1.2) * T, 0, Math.PI * 2); ctx.stroke();
+        ctx.fillStyle = `rgba(255,240,180,${1 - p})`;
+        for (let i = 0; i < 8; i++) {
+          const a = (i / 8) * Math.PI * 2;
+          const d = (f.x2 * 0.5 + p * 1.4) * T;
+          ctx.fillRect(f.x * T + Math.cos(a) * d - 2, f.y * T + Math.sin(a) * d - 2 - p * 10, 4, 4);
+        }
       } else if (f.kind === 'drop') {
         const fall = Math.max(0, 1 - p * 2);
         const x = f.x * T, y = (f.y - fall * 6) * T;
@@ -334,7 +371,7 @@ export class Renderer {
       const r = ZOMBIES[zb.kind].radius * T * 0.85;
       const ex = zb.x * T + Math.cos(zb.dir) * r * 0.5, ey = zb.y * T + Math.sin(zb.dir) * r * 0.5 - 2;
       const px = -Math.sin(zb.dir) * 2.6, py = Math.cos(zb.dir) * 2.6;
-      const sz = zb.kind === 'brute' ? 3 : 2.2;
+      const sz = zb.kind === 'abomination' ? 4 : zb.kind === 'brute' ? 3 : 2.2;
       ctx.beginPath(); ctx.arc(ex + px, ey + py, sz, 0, Math.PI * 2); ctx.arc(ex - px, ey - py, sz, 0, Math.PI * 2); ctx.fill();
     }
     ctx.restore();
@@ -407,6 +444,18 @@ export class Renderer {
       if (!n) return;
       const size = n.kind === 'ruin' ? 2 : 1;
       ctx.strokeRect(n.tx * T - 2, n.ty * T - 2, size * T + 4, size * T + 4);
+    }
+  }
+
+  private levelPips(cx: number, y: number, level: number) {
+    if (level < 2) return;
+    const ctx = this.ctx;
+    for (let i = 0; i < level; i++) {
+      const x = cx + (i - (level - 1) / 2) * 7;
+      ctx.fillStyle = '#141510';
+      ctx.beginPath(); ctx.moveTo(x, y - 4); ctx.lineTo(x + 3.5, y + 1); ctx.lineTo(x - 3.5, y + 1); ctx.fill();
+      ctx.fillStyle = '#f2c94c';
+      ctx.beginPath(); ctx.moveTo(x, y - 2.5); ctx.lineTo(x + 2.2, y + 0.5); ctx.lineTo(x - 2.2, y + 0.5); ctx.fill();
     }
   }
 
@@ -517,6 +566,23 @@ export class Renderer {
         ctx.fillStyle = goldHq ? '#f2c94c' : '#c0392b';
         const wv = Math.sin(now * 4) * 3;
         ctx.beginPath(); ctx.moveTo(x + S - 16, y - 18); ctx.lineTo(x + S + 6, y - 13 + wv); ctx.lineTo(x + S - 16, y - 6); ctx.fill();
+        if (b.level >= 2) {
+          // corner sniper posts
+          for (const [px2, py2] of b.level >= 3 ? [[x + 10, y + 10], [x + S - 10, y + S - 10], [x + 10, y + S - 10]] : [[x + 10, y + 10]]) {
+            ctx.fillStyle = '#5a4630';
+            ctx.fillRect(px2 - 8, py2 - 8, 16, 16);
+            ctx.strokeStyle = '#2a1d12'; ctx.lineWidth = 2; ctx.strokeRect(px2 - 8, py2 - 8, 16, 16);
+          }
+          ctx.strokeStyle = '#222'; ctx.lineWidth = 2.5;
+          ctx.beginPath(); ctx.moveTo(x + 10, y + 10); ctx.lineTo(x + 10 + Math.cos(b.aim) * 16, y + 10 + Math.sin(b.aim) * 16); ctx.stroke();
+          ctx.fillStyle = '#4b6b3a';
+          ctx.beginPath(); ctx.arc(x + 10, y + 10, 4.5, 0, Math.PI * 2); ctx.fill();
+        }
+        if (b.level >= 3) {
+          ctx.strokeStyle = '#7d848a'; ctx.lineWidth = 4;
+          ctx.strokeRect(x + 1, y + 1, S - 2, S - 2);
+        }
+        this.levelPips(x + S / 2, y + S + 3, b.level);
         break;
       }
       case 'house': {
@@ -536,6 +602,8 @@ export class Renderer {
         // boarded planks
         ctx.strokeStyle = '#5a4128'; ctx.lineWidth = 3;
         ctx.beginPath(); ctx.moveTo(x + 10, y + S - 14); ctx.lineTo(x + 26, y + S - 8); ctx.stroke();
+        if (b.level >= 2) { ctx.fillStyle = '#555'; ctx.fillRect(x + 10, y + 8, 7, 9); }
+        this.levelPips(x + S / 2, y + S + 2, b.level);
         break;
       }
       case 'farm': {
@@ -553,6 +621,11 @@ export class Renderer {
         }
         ctx.strokeStyle = '#8a6a40'; ctx.lineWidth = 2;
         ctx.strokeRect(x + 2, y + 2, S - 4, S - 4);
+        if (b.level >= 2) {
+          ctx.strokeStyle = '#4aa3d8'; ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.moveTo(x + 4, y + S - 5); ctx.lineTo(x + S - 4, y + S - 5); ctx.stroke();
+        }
+        this.levelPips(x + S / 2, y + S + 2, b.level);
         break;
       }
       case 'wall':
@@ -584,6 +657,14 @@ export class Renderer {
           ctx.fillStyle = '#9a7040';
           ctx.beginPath(); ctx.arc(x + T / 2, y + T / 2, 3, 0, Math.PI * 2); ctx.fill();
         }
+        if (b.built >= 1 && b.hp < b.maxHp * 0.6) {
+          // visible damage so players can spot weak points
+          ctx.strokeStyle = 'rgba(20,12,6,0.85)'; ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.moveTo(x + m + 2, y + m + 3); ctx.lineTo(x + T / 2, y + T / 2); ctx.lineTo(x + T / 2 - 2, y + T - m - 2);
+          if (b.hp < b.maxHp * 0.3) { ctx.moveTo(x + T / 2, y + T / 2); ctx.lineTo(x + T - m - 2, y + m + 4); }
+          ctx.stroke();
+        }
         break;
       }
       case 'tower': {
@@ -594,15 +675,37 @@ export class Renderer {
         ctx.moveTo(x + 4, y + T - 2); ctx.lineTo(x + T * 0.35, y + T * 0.4);
         ctx.moveTo(x + T - 4, y + T - 2); ctx.lineTo(x + T * 0.65, y + T * 0.4);
         ctx.stroke();
-        ctx.fillStyle = '#6b4a2a';
+        ctx.fillStyle = b.level >= 3 ? '#4f5458' : '#6b4a2a';
         ctx.fillRect(x + 2, y - 6, T - 4, T - 6);
-        ctx.fillStyle = '#86603a';
+        ctx.fillStyle = b.level >= 3 ? '#6c7277' : '#86603a';
         ctx.fillRect(x + 5, y - 3, T - 10, T - 12);
+        if (b.level >= 2) {
+          // sandbag rim
+          ctx.fillStyle = '#9c8a62';
+          for (const [sx2, sy2] of [[x + 4, y - 5], [x + T - 4, y - 5], [x + 4, y + T - 14], [x + T - 4, y + T - 14], [x + T / 2, y - 6]]) {
+            ctx.beginPath(); ctx.ellipse(sx2, sy2, 4.5, 3, 0, 0, Math.PI * 2); ctx.fill();
+          }
+        }
         const cx = x + T / 2, cy = y + T / 2 - 9;
-        ctx.strokeStyle = '#222'; ctx.lineWidth = 3;
-        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(b.aim) * 18, cy + Math.sin(b.aim) * 18); ctx.stroke();
-        ctx.fillStyle = '#3c5a35';
+        ctx.strokeStyle = '#222'; ctx.lineWidth = b.level >= 3 ? 2.5 : 3;
+        const len = 16 + b.level * 2;
+        ctx.beginPath();
+        if (b.level >= 3) {
+          const ox = -Math.sin(b.aim) * 2.2, oy = Math.cos(b.aim) * 2.2;
+          ctx.moveTo(cx + ox, cy + oy); ctx.lineTo(cx + ox + Math.cos(b.aim) * len, cy + oy + Math.sin(b.aim) * len);
+          ctx.moveTo(cx - ox, cy - oy); ctx.lineTo(cx - ox + Math.cos(b.aim) * len, cy - oy + Math.sin(b.aim) * len);
+        } else {
+          ctx.moveTo(cx, cy); ctx.lineTo(cx + Math.cos(b.aim) * len, cy + Math.sin(b.aim) * len);
+        }
+        ctx.stroke();
+        if (b.cd > TOWER_LEVELS[b.level - 1].cooldown - 0.06) {
+          // muzzle flash
+          ctx.fillStyle = 'rgba(255,220,120,0.95)';
+          ctx.beginPath(); ctx.arc(cx + Math.cos(b.aim) * (len + 3), cy + Math.sin(b.aim) * (len + 3), 4, 0, Math.PI * 2); ctx.fill();
+        }
+        ctx.fillStyle = b.level >= 3 ? '#8a2a22' : '#3c5a35';
         ctx.beginPath(); ctx.arc(cx, cy, 6, 0, Math.PI * 2); ctx.fill();
+        this.levelPips(x + T / 2, y + T + 2, b.level);
         break;
       }
       case 'barracks': {
@@ -698,36 +801,89 @@ export class Renderer {
   }
 
   private drawZombie(z: Zombie) {
+    this.drawZombieBody(z.x, z.y, z.kind, z.dir, z.wobble, z.flash > 0, 1);
+    const r = ZOMBIES[z.kind].radius * T * 0.85;
+    if (z.hp < z.maxHp) this.hpBar(z.x * T - r, z.y * T - r - 9, r * 2, z.hp / z.maxHp);
+  }
+
+  /** Shared by live zombies and dying corpses. `fall` goes 1 → 0 as a corpse collapses. */
+  private drawZombieBody(zx: number, zy: number, kind: ZombieKind, ad: number, wobble: number, flash: boolean, fall: number) {
     const ctx = this.ctx;
-    const def = ZOMBIES[z.kind];
-    const x = z.x * T, y = z.y * T;
+    const def = ZOMBIES[kind];
+    const x = zx * T, y = zy * T;
     const r = def.radius * T * 0.85;
-    const sway = Math.sin(z.wobble) * 0.25;
-    const col = z.kind === 'walker' ? '#6b8f4e' : z.kind === 'runner' ? '#93a85c' : '#5e4f6e';
+    const col = ZCOL[kind];
+    const sway = Math.sin(wobble) * 0.25;
     ctx.fillStyle = 'rgba(0,0,0,0.3)';
-    ctx.beginPath(); ctx.ellipse(x, y + r * 0.8, r, r * 0.45, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(x, y + r * 0.8, r * 1.05, r * 0.45, 0, 0, Math.PI * 2); ctx.fill();
+    if (fall < 1) {
+      // collapsing corpse: squash flat and sink into the ground
+      ctx.save();
+      ctx.globalAlpha = Math.min(1, fall * 1.6);
+      ctx.translate(x, y + (1 - fall) * r * 0.5);
+      ctx.rotate(ad + Math.PI / 2 * (1 - fall));
+      ctx.scale(1, 0.35 + 0.65 * fall);
+      ctx.fillStyle = shade(col, -20);
+      ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = shade(col, -45);
+      ctx.beginPath(); ctx.arc(r * 0.4, 0, r * 0.55, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+      return;
+    }
+    // shuffling legs
+    const step = Math.sin(wobble * 1.6) * r * 0.45;
+    const fx = Math.cos(ad), fy = Math.sin(ad), sx = -fy, sy = fx;
+    ctx.fillStyle = shade(col, -50);
+    for (const side of [-1, 1]) {
+      const o = step * side;
+      ctx.beginPath();
+      ctx.ellipse(x + sx * side * r * 0.45 + fx * o, y + sy * side * r * 0.45 + fy * o + r * 0.35, r * 0.3, r * 0.22, ad, 0, Math.PI * 2);
+      ctx.fill();
+    }
     // arms reaching forward
     ctx.strokeStyle = shade(col, -25);
-    ctx.lineWidth = z.kind === 'brute' ? 5 : 3;
-    const ad = z.dir;
-    for (const side of [-1, 1]) {
+    ctx.lineCap = 'round';
+    ctx.lineWidth = kind === 'abomination' ? 8 : kind === 'brute' ? 5 : 3;
+    const arms = kind === 'abomination' ? [-1, -0.45, 0.45, 1] : [-1, 1];
+    for (const side of arms) {
       const bx = x + Math.cos(ad + side * 1.2) * r * 0.8;
       const by = y + Math.sin(ad + side * 1.2) * r * 0.8;
-      const reach = r * 1.25;
+      const reach = r * (kind === 'spitter' ? 0.8 : 1.25);
       ctx.beginPath(); ctx.moveTo(bx, by);
       ctx.lineTo(bx + Math.cos(ad + side * sway) * reach, by + Math.sin(ad + side * sway) * reach);
       ctx.stroke();
     }
-    ctx.fillStyle = z.flash > 0 ? '#ffffff' : col;
+    ctx.lineCap = 'butt';
+    ctx.fillStyle = flash ? '#ffffff' : col;
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
-    ctx.fillStyle = z.flash > 0 ? '#fff' : shade(col, -30);
-    ctx.beginPath(); ctx.arc(x + Math.cos(ad) * r * 0.25, y + Math.sin(ad) * r * 0.25 - 2, r * 0.55, 0, Math.PI * 2); ctx.fill();
-    // glowing eyes
-    ctx.fillStyle = '#ffdf5a';
-    const ex = x + Math.cos(ad) * r * 0.5, ey = y + Math.sin(ad) * r * 0.5 - 2;
-    const px = -Math.sin(ad) * 2.2, py = Math.cos(ad) * 2.2;
-    ctx.fillRect(ex + px - 1, ey + py - 1, 2, 2);
-    ctx.fillRect(ex - px - 1, ey - py - 1, 2, 2);
-    if (z.hp < z.maxHp) this.hpBar(x - r, y - r - 8, r * 2, z.hp / z.maxHp);
+    if (kind === 'spitter' && !flash) {
+      // bloated acid sacs
+      ctx.fillStyle = '#c8e04a';
+      ctx.beginPath(); ctx.arc(x - fx * r * 0.45 + sx * r * 0.3, y - fy * r * 0.45 + sy * r * 0.3, r * 0.42, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(x - fx * r * 0.35 - sx * r * 0.4, y - fy * r * 0.35 - sy * r * 0.4, r * 0.3, 0, Math.PI * 2); ctx.fill();
+    }
+    if (kind === 'abomination' && !flash) {
+      // bone spikes along the back
+      ctx.fillStyle = '#d8ccb4';
+      for (let i = -2; i <= 2; i++) {
+        const a = ad + Math.PI + i * 0.45;
+        const bx = x + Math.cos(a) * r * 0.85, by = y + Math.sin(a) * r * 0.85;
+        ctx.beginPath();
+        ctx.moveTo(bx + Math.cos(a + 1.6) * 4, by + Math.sin(a + 1.6) * 4);
+        ctx.lineTo(bx + Math.cos(a) * 11, by + Math.sin(a) * 11);
+        ctx.lineTo(bx + Math.cos(a - 1.6) * 4, by + Math.sin(a - 1.6) * 4);
+        ctx.fill();
+      }
+      ctx.fillStyle = 'rgba(120,20,30,0.7)';
+      ctx.beginPath(); ctx.arc(x - fx * r * 0.2 + sx * r * 0.35, y - fy * r * 0.2 + sy * r * 0.35, r * 0.25, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = flash ? '#fff' : shade(col, -30);
+    ctx.beginPath(); ctx.arc(x + fx * r * 0.25, y + fy * r * 0.25 - 2, r * 0.55, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = kind === 'abomination' ? '#ff5a3a' : '#ffdf5a';
+    const ex = x + fx * r * 0.5, ey = y + fy * r * 0.5 - 2;
+    const e = kind === 'abomination' ? 4 : 2.2;
+    ctx.fillRect(ex + sx * e - 1, ey + sy * e - 1, 2.4, 2.4);
+    ctx.fillRect(ex - sx * e - 1, ey - sy * e - 1, 2.4, 2.4);
   }
+
 }

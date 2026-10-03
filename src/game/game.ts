@@ -1,7 +1,8 @@
 import {
-  AIRSTRIKE, BUILDINGS, CAPS, DAY_LEN, DUSK_WARNING, FARM_SLOTS, FOOD_PER_PERSON_DAWN, GATHER, GUARD_TRAIN,
-  MAP_H, MAP_W, NIGHT_LEN, POP_HOUSE, POP_HQ, RUIN, SUPPLY_DROP, TOWER, TRAP, UNITS, ZOMBIE_AGGRO, ZOMBIES,
-  canAfford, hordeMix, hordeSize, pay, type BuildingKind, type Cost, type ResKey, type ZombieKind,
+  AIRSTRIKE, BUILDINGS, CAPS, DAY_LEN, DUSK_WARNING, EVENT_AT, FARM_SLOTS, FOOD_PER_PERSON_DAWN, GATHER, GUARD_TRAIN,
+  HOUSE_POP, HQ_LEVELS, MAP_H, MAP_W, NIGHT_LEN, POP_HQ, RESCUE_NIGHT, RUIN, SUPPLY_DROP, TOWER_LEVELS, TRAP, UNITS,
+  UPGRADES, ZOMBIE_AGGRO, ZOMBIES, canAfford, hordeMix, hordeSize, pay,
+  type BuildingKind, type Cost, type GunStats, type ResKey, type UpgradeDef, type ZombieKind,
 } from './config';
 import { buildOccupancy, computeFlow, isSolid, nextStep } from './flow';
 import { QUESTS } from './quests';
@@ -18,9 +19,17 @@ export type GameEvent =
   | { type: 'gameover' }
   | { type: 'dawn' }
   | { type: 'dusk' }
-  | { type: 'save' };
+  | { type: 'save' }
+  | { type: 'victory' }
+  | { type: 'quest'; index: number; reward: number; title: string };
 
 const dist = (ax: number, ay: number, bx: number, by: number) => Math.hypot(ax - bx, ay - by);
+const clampToMap = (x: number, y: number): [number, number] => [
+  Math.max(0.6, Math.min(MAP_W - 0.6, x)),
+  Math.max(0.6, Math.min(MAP_H - 0.6, y)),
+];
+/** Hard cap on live zombies; extra spawns wait until there is room. Keeps late Blood Moons smooth on older iPhones. */
+const MAX_ZOMBIES = 240;
 
 export class Game {
   s: GameState;
@@ -42,6 +51,12 @@ export class Game {
   constructor(state: GameState, perks: Perks) {
     this.s = state;
     this.perks = perks;
+    // fill fields added after v1.0 so older saves keep working
+    for (const b of state.buildings) b.level ??= 1;
+    state.stats.upgrades ??= 0;
+    state.event ??= null;
+    state.eventDay ??= 0;
+    state.victory ??= false;
     this.rebuildCaches();
   }
 
@@ -66,7 +81,7 @@ export class Game {
     if (this.flowDirty) {
       this.flowAge = 0;
       this.flowSoft = false;
-      this.flow = computeFlow(this.s.buildings, this.occ, this.byId);
+      this.flow = computeFlow(this.s.buildings, this.occ, this.byId, this.flow);
       this.flowDirty = false;
     }
   }
@@ -78,7 +93,9 @@ export class Game {
   get hq(): Building { return this.s.buildings.find((b) => b.kind === 'hq')!; }
   get workers(): Unit[] { return this.s.units.filter((u) => u.kind === 'worker'); }
   get popCap(): number {
-    return POP_HQ + this.s.buildings.filter((b) => b.kind === 'house' && b.built >= 1).length * POP_HOUSE;
+    let cap = POP_HQ + HQ_LEVELS[this.hq.level - 1].pop;
+    for (const b of this.s.buildings) if (b.kind === 'house' && b.built >= 1) cap += HOUSE_POP[b.level - 1];
+    return cap;
   }
   get pop(): number { return this.s.units.length; }
 
@@ -117,7 +134,7 @@ export class Game {
     pay(this.s.res, def.cost);
     const b: Building = {
       id: this.s.nextId++, kind, tx, ty, size: def.size, hp: def.buildTime > 0 ? def.hp * 0.15 : def.hp, maxHp: def.hp,
-      built: def.buildTime > 0 ? 0 : 1, cd: 0, aim: 0, trainQueue: 0, trainTimer: 0,
+      built: def.buildTime > 0 ? 0 : 1, cd: 0, aim: 0, trainQueue: 0, trainTimer: 0, level: 1,
     };
     this.s.buildings.push(b);
     this.byId.set(b.id, b);
@@ -137,11 +154,124 @@ export class Game {
   }
 
   private removeBuilding(b: Building) {
+    if (b.trainQueue > 0) {
+      // recruits in training walk back out, and their supplies are returned
+      for (let i = 0; i < b.trainQueue; i++) this.s.units.push(makeUnit(this.s, 'worker', b.tx + b.size / 2, b.ty + b.size + 0.4));
+      pay(this.s.res, GUARD_TRAIN.cost, -b.trainQueue);
+      b.trainQueue = 0;
+    }
     this.s.buildings = this.s.buildings.filter((x) => x !== b);
     this.byId.delete(b.id);
     for (let y = b.ty; y < b.ty + b.size; y++) for (let x = b.tx; x < b.tx + b.size; x++) this.occ[y * MAP_W + x] = 0;
     for (const u of this.s.units) if (u.targetId === b.id && (u.state === 'toFarm' || u.state === 'farming')) u.state = 'idle';
     this.flowDirty = true;
+  }
+
+  /** The next upgrade for a building, or null when maxed / not upgradable. */
+  nextUpgrade(b: Building): UpgradeDef | null {
+    return UPGRADES[b.kind]?.[b.level - 1] ?? null;
+  }
+
+  upgrade(b: Building): string | null {
+    const up = this.nextUpgrade(b);
+    if (!up) return 'Already fully upgraded';
+    if (b.built < 1) return 'Finish construction first';
+    if (this.s.day < up.unlockDay) return `Unlocks on Day ${up.unlockDay}`;
+    if (!canAfford(this.s.res, up.cost)) return 'Not enough resources';
+    pay(this.s.res, up.cost);
+    const frac = b.hp / b.maxHp;
+    if (b.kind === 'wall') {
+      b.kind = 'steelwall';
+      b.maxHp = BUILDINGS.steelwall.hp;
+    } else {
+      b.level++;
+      b.maxHp = this.levelHp(b);
+    }
+    b.hp = Math.max(frac, 0.5) * b.maxHp;
+    this.s.stats.upgrades = (this.s.stats.upgrades ?? 0) + 1;
+    this.flowDirty = true;
+    this.s.fx.push({ kind: 'pop', x: b.tx + b.size / 2, y: b.ty + b.size / 2, x2: b.size, y2: 0, t: 0, life: 0.6 });
+    this.sound('build');
+    return null;
+  }
+
+  private levelHp(b: Building): number {
+    if (b.kind === 'hq') return HQ_LEVELS[b.level - 1].hp;
+    return Math.round(BUILDINGS[b.kind].hp * (1 + 0.5 * (b.level - 1)));
+  }
+
+  towerStats(b: Building): GunStats {
+    return TOWER_LEVELS[b.level - 1];
+  }
+
+  farmSlots(b: Building): number {
+    return FARM_SLOTS + (b.level - 1);
+  }
+
+  // ---------------------------------------------------------------- day events
+  acceptEvent(): string | null {
+    const ev = this.s.event;
+    if (!ev) return null;
+    if (ev.kind === 'trader') {
+      if (!canAfford(this.s.res, ev.give)) return 'Not enough to trade';
+      pay(this.s.res, ev.give);
+      for (const k of Object.keys(ev.get) as ResKey[]) this.s.res[k] += ev.get[k] ?? 0;
+      this.toast('🤝 Deal. The trader moves on.', 'good');
+    } else {
+      const room = this.popCap - this.pop;
+      if (room <= 0) return 'No room. Build or upgrade houses first.';
+      const n = Math.min(room, ev.count);
+      for (let i = 0; i < n; i++) this.addSurvivor(null);
+      this.toast(`🧍 ${n} refugee${n > 1 ? 's' : ''} joined the Haven`, 'good');
+    }
+    this.s.event = null;
+    this.sound('coin');
+    return null;
+  }
+
+  declineEvent() {
+    this.s.event = null;
+    this.sound('click');
+  }
+
+  private startDayEvent() {
+    const s = this.s;
+    s.eventDay = s.day;
+    const r = rand(s);
+    const scale = 1 + s.day * 0.12;
+    const n = (v: number) => Math.round((v * scale) / 5) * 5;
+    if (r < 0.45) {
+      const deals: Array<[Cost, Cost]> = [
+        [{ food: n(30) }, { scrap: n(45) }],
+        [{ wood: n(50) }, { scrap: n(35) }],
+        [{ scrap: n(30) }, { food: n(45) }],
+        [{ scrap: n(25) }, { wood: n(55) }],
+      ];
+      const [give, get] = deals[Math.floor(rand(s) * deals.length)];
+      s.event = { kind: 'trader', give, get };
+      this.toast('🛒 A trader is at the gate', 'info');
+    } else if (r < 0.75) {
+      s.event = { kind: 'refugees', count: 2 + (rand(s) < 0.3 ? 1 : 0) };
+      this.toast('🧍 Refugees are asking to join', 'info');
+    } else {
+      // radio chatter reveals a one-search supply cache somewhere in the wasteland
+      for (let tries = 0; tries < 40; tries++) {
+        const a = rand(s) * Math.PI * 2, d = 12 + rand(s) * 14;
+        const tx = Math.round(HQ_CX + Math.cos(a) * d) - 1, ty = Math.round(HQ_CY + Math.sin(a) * d) - 1;
+        if (tx < 2 || ty < 2 || tx > MAP_W - 4 || ty > MAP_H - 4) continue;
+        let free = true;
+        for (let y = ty; y < ty + 2; y++) for (let x = tx; x < tx + 2; x++) if (this.occ[y * MAP_W + x] || this.nodeGrid[y * MAP_W + x]) free = false;
+        if (!free) continue;
+        const node: ResNode = { id: s.nextId++, kind: 'ruin', tx, ty, amount: 1, max: 1, variant: 0 };
+        s.nodes.push(node);
+        this.nodeById.set(node.id, node);
+        for (let y = ty; y < ty + 2; y++) for (let x = tx; x < tx + 2; x++) this.nodeGrid[y * MAP_W + x] = node.id;
+        reveal(s, tx + 1, ty + 1, 3);
+        const dir = `${ty + 1 < HQ_CY - 4 ? 'north' : ty + 1 > HQ_CY + 4 ? 'south' : ''}${tx + 1 < HQ_CX - 4 ? 'west' : tx + 1 > HQ_CX + 4 ? 'east' : ''}` || 'nearby';
+        this.toast(`📻 Radio chatter: a supply cache to the ${dir}. Send a scavenger!`, 'info');
+        break;
+      }
+    }
   }
 
   repairCost(b: Building): Cost {
@@ -191,6 +321,7 @@ export class Game {
   }
 
   finishNow(b: Building) {
+    if (b.built >= 1) return;
     b.hp = b.maxHp;
     b.built = 1;
     this.flowDirty = true;
@@ -277,12 +408,15 @@ export class Game {
   }
 
   orderPost(u: Unit, x: number, y: number) {
+    [x, y] = clampToMap(x, y);
     u.post = { x, y };
     u.patrol = null;
     this.sound('click');
   }
 
   orderPatrol(u: Unit, ax: number, ay: number, bx: number, by: number) {
+    [ax, ay] = clampToMap(ax, ay);
+    [bx, by] = clampToMap(bx, by);
     u.patrol = { ax, ay, bx, by, toB: true };
     u.post = null;
     this.s.stats.patrols++;
@@ -299,7 +433,11 @@ export class Game {
   airstrike(x: number, y: number) {
     let killed = 0;
     for (const z of this.s.zombies) {
-      if (dist(z.x, z.y, x, y) <= AIRSTRIKE.radius) { z.hp -= AIRSTRIKE.dmg; z.flash = 0.2; if (z.hp <= 0) killed++; }
+      if (z.hp > 0 && dist(z.x, z.y, x, y) <= AIRSTRIKE.radius) {
+        z.hp -= AIRSTRIKE.dmg;
+        z.flash = 0.2;
+        if (z.hp <= 0) { killed++; this.killZombie(z); }
+      }
     }
     for (let i = 0; i < 7; i++) {
       const a = rand(this.s) * Math.PI * 2, r = rand(this.s) * AIRSTRIKE.radius * 0.8;
@@ -363,12 +501,13 @@ export class Game {
     const s = this.s;
     s.phaseTime += dt;
     if (!s.isNight) {
-      if (!s.warned && s.phaseTime >= DAY_LEN - DUSK_WARNING) this.planHorde();
+      if (!s.warned && s.phaseTime >= DAY_LEN - DUSK_WARNING) { this.planHorde(); s.event = null; }
+      if (s.day >= 2 && s.eventDay !== s.day && s.phaseTime >= EVENT_AT && !s.warned) this.startDayEvent();
       s.wanderTimer += dt;
       if (s.day >= 2 && s.wanderTimer > 26) {
         s.wanderTimer = 0;
         const dayZ = s.zombies.length;
-        if (dayZ < 2 + Math.floor(s.day / 3)) this.spawnZombie('walker', Math.floor(rand(s) * 4));
+        if (dayZ < Math.min(MAX_ZOMBIES, 2 + Math.floor(s.day / 3))) this.spawnZombie('walker', Math.floor(rand(s) * 4));
       }
       s.arrivalTimer += dt;
       if (s.arrivalTimer > 40) {
@@ -382,7 +521,7 @@ export class Game {
         for (const u of this.workers) this.sendHome(u);
       }
     } else {
-      while (s.spawns.length && s.spawns[0].at <= s.phaseTime) {
+      while (s.spawns.length && s.spawns[0].at <= s.phaseTime && s.zombies.length < MAX_ZOMBIES) {
         const o = s.spawns.shift()!;
         this.spawnZombie(o.kind, o.edge);
       }
@@ -406,7 +545,9 @@ export class Game {
       s.spawns.push({ kind: hordeMix(s.day, rand(s)), at: 1 + (i / n) * 34 + rand(s) * 2, edge: edges[i % edges.length] });
     }
     if (s.day % 5 === 0) {
-      for (let i = 0; i < Math.floor(s.day / 5); i++) s.spawns.push({ kind: 'brute', at: 20 + i * 3, edge: edges[0] });
+      // Blood Moon: an Abomination leads the horde, with Brute escorts on later moons
+      s.spawns.push({ kind: 'abomination', at: 14, edge: edges[0] });
+      for (let i = 1; i < Math.floor(s.day / 5); i++) s.spawns.push({ kind: 'brute', at: 16 + i * 3, edge: edges[0] });
     }
     s.spawns.sort((a, b) => a.at - b.at);
     const from = edges.map((e) => EDGE_NAMES[e]).join(' & ');
@@ -448,6 +589,11 @@ export class Game {
       this.toast(`☀️ Day ${s.day}. ${n} new survivor${n > 1 ? 's' : ''} arrived at dawn.`, 'good');
     } else {
       this.toast(`☀️ Day ${s.day}. You made it through the night.`, 'good');
+    }
+    if (s.nightsSurvived >= RESCUE_NIGHT && !s.victory) {
+      s.victory = true;
+      this.emit({ type: 'caps', amount: 100, reason: 'Rescue convoy reached the Haven' });
+      this.emit({ type: 'victory' });
     }
     this.emit({ type: 'dawn' });
     this.emit({ type: 'save' });
@@ -493,19 +639,21 @@ export class Game {
         if (b.built >= 1) this.onBuilt(b);
         continue;
       }
-      if (b.kind === 'tower') {
+      const gun = b.kind === 'tower' ? TOWER_LEVELS[b.level - 1] : b.kind === 'hq' ? HQ_LEVELS[b.level - 1].gun : null;
+      if (gun) {
         b.cd -= dt;
         if (b.cd <= 0) {
-          const cx = b.tx + 0.5, cy = b.ty + 0.5;
-          const z = this.nearestZombie(cx, cy, TOWER.range);
+          const cx = b.tx + b.size / 2, cy = b.ty + b.size / 2 - (b.kind === 'tower' ? 0.3 : 0);
+          const z = this.nearestZombie(cx, cy, gun.range);
           if (z) {
-            b.cd = TOWER.cooldown;
+            b.cd = gun.cooldown;
             b.aim = Math.atan2(z.y - cy, z.x - cx);
-            this.hitZombie(z, TOWER.dmg, cx, cy);
-            this.sound('rifle');
+            this.hitZombie(z, gun.dmg, cx, cy);
+            this.sound(b.kind === 'tower' && b.level === 3 ? 'shot' : 'rifle');
           }
         }
-      } else if (b.kind === 'barracks' && b.trainQueue > 0) {
+      }
+      if (b.kind === 'barracks' && b.trainQueue > 0) {
         b.trainTimer -= dt;
         if (b.trainTimer <= 0) {
           b.trainQueue--;
@@ -547,6 +695,7 @@ export class Game {
     z.hp -= dmg;
     z.flash = 0.12;
     this.s.fx.push({ kind: 'tracer', x: fromX, y: fromY, x2: z.x, y2: z.y, t: 0, life: 0.09 });
+    this.s.fx.push({ kind: 'spark', x: z.x, y: z.y, x2: Math.atan2(z.y - fromY, z.x - fromX), y2: 0, t: 0, life: 0.25 });
     if (z.hp <= 0) this.killZombie(z);
   }
 
@@ -554,9 +703,14 @@ export class Game {
     if (z.hp > 0 || z.cd === -99) return;
     z.cd = -99; // mark as counted
     this.s.kills++;
-    this.s.fx.push({ kind: 'blood', x: z.x, y: z.y, x2: rand(this.s), y2: ZOMBIES[z.kind].radius, t: 0, life: 18 });
-    if (z.kind === 'brute') {
-      this.emit({ type: 'caps', amount: ZOMBIES.brute.bounty, reason: 'Brute bounty' });
+    const def = ZOMBIES[z.kind];
+    this.s.fx.push({ kind: 'blood', x: z.x, y: z.y, x2: rand(this.s), y2: def.radius, t: 0, life: 18 });
+    this.s.fx.push({ kind: 'corpse', x: z.x, y: z.y, x2: z.dir, y2: def.radius, t: 0, life: 1.4, text: z.kind });
+    if (def.bounty) this.emit({ type: 'caps', amount: def.bounty, reason: `${def.name} bounty` });
+    if (z.kind === 'abomination') {
+      this.toast('☠️ The Abomination is down!', 'good');
+      this.emit({ type: 'shake', amount: 12 });
+      this.sound('boom');
     }
   }
 
@@ -783,7 +937,7 @@ export class Game {
     for (const b of this.s.buildings) {
       if (b.kind !== 'farm' || b.built < 1) continue;
       const used = this.s.units.filter((o) => o !== u && o.job === 'food' && o.targetId === b.id && (o.state === 'toFarm' || o.state === 'farming')).length;
-      if (used >= FARM_SLOTS) continue;
+      if (used >= this.farmSlots(b)) continue;
       const d = dist(u.x, u.y, b.tx + 1, b.ty + 1);
       if (d < bd) { bd = d; best = b; }
     }
@@ -829,12 +983,14 @@ export class Game {
   private updateZombies(dt: number) {
     const s = this.s;
     const zs = s.zombies;
+    const unitById = new Map<number, Unit>();
+    for (const u of s.units) unitById.set(u.id, u);
     for (const z of zs) {
       if (z.hp <= 0) continue;
       const def = ZOMBIES[z.kind];
       z.flash = Math.max(0, z.flash - dt);
       z.cd -= dt;
-      z.wobble += dt * (z.kind === 'runner' ? 9 : 4);
+      z.wobble += dt * (z.kind === 'runner' ? 9 : z.kind === 'abomination' ? 2.5 : 4);
       let speed = def.speed;
       const under = this.buildingAt(Math.floor(z.x), Math.floor(z.y));
       if (under && under.kind === 'trap') speed *= TRAP.slow;
@@ -852,7 +1008,9 @@ export class Game {
         }
       }
       let tx: number, ty: number;
-      const prey = z.chaseId ? s.units.find((u) => u.id === z.chaseId && u.state !== 'sheltered') : undefined;
+      const chased = z.chaseId ? unitById.get(z.chaseId) : undefined;
+      const prey = chased && chased.state !== 'sheltered' ? chased : undefined;
+      if (def.range > 0 && this.spit(z, prey)) continue;
       if (prey) {
         const d = dist(z.x, z.y, prey.x, prey.y);
         if (d < def.radius + 0.35) {
@@ -885,11 +1043,20 @@ export class Game {
       z.x = Math.max(0.2, Math.min(MAP_W - 0.2, nx));
       z.y = Math.max(0.2, Math.min(MAP_H - 0.2, ny));
     }
-    // light separation so hordes spread out instead of stacking
-    for (let i = 0; i < zs.length; i++) {
-      const a = zs[i];
-      for (let j = i + 1; j < zs.length; j++) {
-        const b = zs[j];
+    // light separation so hordes spread out instead of stacking; a tile grid keeps this O(n)
+    const grid = new Map<number, Zombie[]>();
+    for (const z of zs) {
+      const k = Math.floor(z.y) * MAP_W + Math.floor(z.x);
+      const cell = grid.get(k);
+      if (cell) cell.push(z); else grid.set(k, [z]);
+    }
+    for (const a of zs) {
+      const ax = Math.floor(a.x), ay = Math.floor(a.y);
+      for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
+        const cell = grid.get((ay + oy) * MAP_W + ax + ox);
+        if (!cell) continue;
+        for (const b of cell) {
+        if (b.id <= a.id) continue;
         const dx = b.x - a.x, dy = b.y - a.y;
         const min = ZOMBIES[a.kind].radius + ZOMBIES[b.kind].radius;
         const d2 = dx * dx + dy * dy;
@@ -900,16 +1067,60 @@ export class Game {
           if (!isSolid(this.buildingAt(Math.floor(a.x - px), Math.floor(a.y - py)))) { a.x -= px; a.y -= py; }
           if (!isSolid(this.buildingAt(Math.floor(b.x + px), Math.floor(b.y + py)))) { b.x += px; b.y += py; }
         }
+        }
       }
     }
     s.zombies = zs.filter((z) => z.hp > 0);
   }
 
-  private attackBuilding(z: Zombie, b: Building) {
-    if (z.cd > 0) return;
-    z.cd = 1;
+  /** Spitters lob acid from range at people or at the nearest structure. Returns true if it attacked (so it holds still). */
+  private spit(z: Zombie, prey: Unit | undefined): boolean {
+    const def = ZOMBIES[z.kind];
+    let tx = 0, ty = 0;
+    let hit: (() => void) | null = null;
+    if (prey && dist(z.x, z.y, prey.x, prey.y) <= def.range) {
+      tx = prey.x; ty = prey.y;
+      hit = () => { prey.hp -= def.dmg; prey.hurt = 0.2; };
+    } else {
+      if (z.think === 0.4 || z.siegeId === undefined) z.siegeId = this.findSiegeTarget(z.x, z.y, def.range);
+      const b = z.siegeId ? this.byId.get(z.siegeId) : undefined;
+      if (!b || !isSolid(b)) { z.siegeId = 0; return false; }
+      tx = Math.max(b.tx, Math.min(b.tx + b.size, z.x));
+      ty = Math.max(b.ty, Math.min(b.ty + b.size, z.y));
+      hit = () => this.attackBuilding(z, b, true);
+    }
+    z.dir = Math.atan2(ty - z.y, tx - z.x);
+    if (z.cd <= 0) {
+      this.s.fx.push({ kind: 'acid', x: z.x, y: z.y, x2: tx, y2: ty, t: 0, life: 0.45 });
+      hit();
+      z.cd = 2;
+    }
+    return true;
+  }
+
+  /** Nearest solid structure within range, scanning a small square of tiles. */
+  private findSiegeTarget(x: number, y: number, range: number): number {
+    const r = Math.ceil(range);
+    const cx = Math.floor(x), cy = Math.floor(y);
+    let best = 0, bd = range;
+    for (let ty = cy - r; ty <= cy + r; ty++) {
+      for (let tx = cx - r; tx <= cx + r; tx++) {
+        const b = this.buildingAt(tx, ty);
+        if (!b || !isSolid(b)) continue;
+        const d = dist(x, y, tx + 0.5, ty + 0.5);
+        if (d < bd) { bd = d; best = b.id; }
+      }
+    }
+    return best;
+  }
+
+  private attackBuilding(z: Zombie, b: Building, ranged = false) {
+    if (!ranged) {
+      if (z.cd > 0) return;
+      z.cd = 1;
+    }
     let dmg = ZOMBIES[z.kind].dmg;
-    if (z.kind === 'brute' && (b.kind === 'wall' || b.kind === 'steelwall')) dmg *= 1.5;
+    if (b.kind === 'wall' || b.kind === 'steelwall') dmg *= ZOMBIES[z.kind].wallMult;
     b.hp -= dmg;
     if (rand(this.s) < 0.15) this.sound('groan');
     if (b.hp <= 0 && b.kind !== 'hq') {
@@ -938,8 +1149,9 @@ export class Game {
   private checkQuests() {
     const q = QUESTS[this.s.questIndex];
     if (q && q.done(this.s)) {
+      // the app pays the reward once per player profile, so replaying runs can't farm Caps
+      this.emit({ type: 'quest', index: this.s.questIndex, reward: q.reward, title: q.title });
       this.s.questIndex++;
-      this.emit({ type: 'caps', amount: q.reward, reason: `Goal complete: ${q.title}` });
       this.sound('coin');
     }
   }

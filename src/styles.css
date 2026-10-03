@@ -89,7 +89,8 @@ button:disabled { opacity: 0.45; cursor: default; }
 .toast.out { opacity: 0; transform: translateY(-8px); }
 @keyframes tin { from { opacity: 0; transform: translateY(-10px) scale(0.96); } }
 @media (min-width: 900px) { .toasts { top: calc(var(--sat) + 52px); } .quest { top: calc(var(--sat) + 52px); } }
-@media (max-width: 899px) { .toasts { top: calc(var(--sat) + 104px); } }
+@media (max-width: 899px) and (orientation: portrait) { .toasts { top: calc(var(--sat) + 104px); } }
+@media (max-height: 500px) { .toasts { top: calc(var(--sat) + 50px); left: auto; right: calc(var(--sar) + 8px); transform: none; width: min(340px, 45vw); align-items: flex-end; } }
 @media (max-width: 520px) { .toasts { top: calc(var(--sat) + 150px); } }
 
 /* ---------- bottom ---------- */
@@ -236,3 +237,74 @@ button:disabled { opacity: 0.45; cursor: default; }
   .bottom { gap: 4px; }
 }
 @media (max-width: 520px) { .quest { top: calc(var(--sat) + 80px); } }
+
+/* ---------- icon set ---------- */
+.ico { width: 1.25em; height: 1.25em; vertical-align: -0.28em; flex: 0 0 auto; overflow: visible; }
+.ico.big { width: 40px; height: 40px; }
+.chip .ico { width: 18px; height: 18px; }
+.iconbtn { display: grid; place-items: center; }
+.iconbtn .ico { width: 18px; height: 18px; }
+.tabs button .ico { width: 24px; height: 24px; }
+.card .ic .ico { width: 30px; height: 30px; }
+.job .ic .ico { width: 24px; height: 24px; }
+.daypill #dayicon { display: inline-flex; }
+.daypill #dayicon .ico { width: 20px; height: 20px; }
+.cost, .card .cost { display: inline-flex; gap: 6px; align-items: center; }
+.cost .c { display: inline-flex; align-items: center; gap: 1px; }
+.cost .ico { width: 14px; height: 14px; vertical-align: -0.2em; }
+.btn .cost { color: inherit; margin-left: 4px; }
+.sel .info b .ico { width: 20px; height: 20px; }
+.lvl { background: #2e3526; color: var(--gold); border-radius: 6px; padding: 1px 5px; font-size: 10.5px; margin-left: 4px; }
+.upnote { color: #b9d9a8 !important; }
+.upnote .ico { width: 14px; height: 14px; }
+
+/* ---------- guided focus ---------- */
+.pulse { position: relative; animation: pulse 1.3s ease-in-out infinite; border-color: var(--gold) !important; }
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(242, 201, 76, 0.75); }
+  60% { box-shadow: 0 0 0 9px rgba(242, 201, 76, 0); }
+}
+
+/* ---------- boss bar ---------- */
+.boss {
+  position: absolute; top: calc(var(--sat) + 48px); left: 50%; transform: translateX(-50%); width: min(360px, 70vw);
+  background: rgba(40, 8, 10, 0.88); border: 1px solid #8a2a22; border-radius: 12px; padding: 5px 10px 7px; text-align: center;
+  animation: tin 0.3s ease;
+}
+.boss b { font-size: 12px; letter-spacing: 2px; color: #ffb4a8; display: inline-flex; gap: 6px; align-items: center; }
+.boss .bar { height: 7px; background: rgba(255, 255, 255, 0.1); border-radius: 4px; overflow: hidden; margin-top: 4px; }
+.boss .bar i { display: block; height: 100%; background: linear-gradient(90deg, #e5483a, #ff8a3a); transition: width 0.2s; }
+@media (max-width: 520px) { .boss { top: calc(var(--sat) + 80px); } }
+
+/* ---------- day events ---------- */
+.event:empty { display: none; }
+.event { width: min(520px, 100%); pointer-events: auto; }
+.evcard {
+  display: flex; gap: 10px; align-items: center; background: #221d10; border: 1px solid var(--gold-dark); border-radius: 14px;
+  padding: 8px 10px; animation: tin 0.25s ease; box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+.evcard .info { flex: 1; min-width: 0; }
+.evcard .info b { display: inline-flex; gap: 6px; align-items: center; }
+.evcard .info p { margin: 2px 0 0; font-size: 12.5px; color: var(--muted); }
+.evcard .acts { display: flex; gap: 6px; }
+
+/* ---------- shop art & victory ---------- */
+.product .pic { width: 44px; display: grid; place-items: center; }
+.capstack { position: relative; display: inline-block; width: 40px; height: 34px; }
+.capstack .cap { position: absolute; width: 20px; height: 20px; margin: 0; }
+.capstack .cap:nth-child(1) { left: 10px; top: 12px; }
+.capstack .cap:nth-child(2) { left: 2px; top: 6px; }
+.capstack .cap:nth-child(3) { left: 18px; top: 4px; }
+.capstack .cap:nth-child(4) { left: 6px; top: -2px; }
+.capstack .cap:nth-child(5) { left: 16px; top: -6px; }
+.over.win h1 { color: var(--green); }
+.convoy { display: grid; place-items: center; margin-bottom: 6px; }
+.convoy .ico { width: 64px; height: 64px; }
+
+.card .nm { white-space: nowrap; }
+.toasts { z-index: 5; }
+@media (max-height: 500px) {
+  .sel .desc { display: none; }
+  .sel { padding: 6px 10px; }
+  .card .nm { font-size: 10.5px; }
+}
