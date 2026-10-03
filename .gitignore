@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.DS_Store
+*.log
+coverage/
+# iOS build outputs (the ios/ project itself is committed)
+ios/App/Pods/
+ios/App/build/
+ios/App/App/public/
+ios/DerivedData/
+xcuserdata/
