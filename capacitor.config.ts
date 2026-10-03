@@ -3,7 +3,8 @@ import type { CapacitorConfig } from '@capacitor/cli';
 // IMPORTANT: change appId to your own reverse-domain bundle ID before
 // registering the app in App Store Connect. It must match exactly.
 const config: CapacitorConfig = {
-  appId: 'com.lasthaven.game',
+  // CI sets APP_BUNDLE_ID from a repository secret (see docs/RELEASE_AUTOMATION.md)
+  appId: process.env.APP_BUNDLE_ID || 'com.lasthaven.game',
   appName: 'Last Haven',
   webDir: 'dist',
   ios: {

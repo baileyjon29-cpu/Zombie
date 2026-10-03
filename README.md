@@ -102,7 +102,7 @@ npm run build      # production web build in dist/
 
 ## Ship it to the App Store
 
-See **[docs/APP_STORE.md](docs/APP_STORE.md)**. In short, on a Mac with Xcode:
+See **[docs/APP_STORE.md](docs/APP_STORE.md)**. To build and upload without a Mac, see **[docs/RELEASE_AUTOMATION.md](docs/RELEASE_AUTOMATION.md)**. In short, on a Mac with Xcode:
 
 ```bash
 npm install
