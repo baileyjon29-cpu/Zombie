@@ -12,7 +12,7 @@ This checklist takes the repository from code to a live App Store listing with w
 | **Apple Developer Program** membership | $99/year at developer.apple.com/programs. Enroll as an organization if you want a company name as the seller (needs a D-U-N-S number). |
 | **Node.js 20+** | `brew install node` |
 | An iPhone for testing | Optional but strongly recommended |
-| A **privacy policy URL** | Apple requires one for every app. A simple page is fine (see §7). |
+| A **privacy policy URL** | Apple requires one for every app. It's ready in `docs/privacy.html`; you only need to publish it (see §7). |
 
 ---
 
@@ -104,7 +104,7 @@ To change prices or add products later, edit `PRODUCTS` in `src/platform/store.t
 | **Category** | Games → Strategy (secondary: Simulation) |
 | **Age rating** | Answer the questionnaire honestly. The game has cartoon violence (zombies) and no blood realism, gambling, or user-generated content. Expect **9+** to **12+**. |
 | **App Privacy** | **Data Not Collected.** The game has no accounts, analytics or ads, and saves only on the device. Update this if you add analytics or ads later. |
-| **Privacy policy URL** | Required. A one-page statement such as "Last Haven does not collect personal data. Game progress is stored only on your device. Purchases are processed by Apple." hosted on any website (GitHub Pages works). |
+| **Privacy policy URL** | Required. Publish `docs/privacy.html` (see *Publishing the privacy policy* below) and paste its URL here. |
 | **Keywords** (100 chars) | `zombie,survival,base,builder,strategy,apocalypse,tower,defense,colony,settlement,scavenge,farm` |
 
 **Description (draft):**
@@ -125,7 +125,23 @@ To change prices or add products later, edit `PRODUCTS` in `src/platform/store.t
 >
 > How long will your Haven stand?
 
-**Screenshots required:** at least one set for **6.9" iPhone** (1320×2868 or 2868×1320) and, because the app runs on iPad, **13" iPad** (2064×2752 or 2752×2064). Take them in the iOS Simulator (**⌘S**) during an exciting night defense, a big base by day, and the Trading Post.
+**Publishing the privacy policy:** the policy is written and ready in `docs/privacy.html`. It states the game collects no data, matching the **Data Not Collected** privacy label. To host it free with GitHub Pages:
+1. GitHub → this repository → **Settings → Pages**.
+2. **Source:** *Deploy from a branch* → branch `main`, folder `/docs` → **Save**.
+3. After a minute the policy is live at `https://<your-github-username>.github.io/<repo-name>/privacy.html`. Paste that URL into App Store Connect (**App Information → Privacy Policy URL**).
+
+GitHub Pages on a private repository needs a paid GitHub plan. If the repository is private, paste the file into any website you control instead. The contact email in the policy is the one at the bottom of `docs/privacy.html`; change it there if it should be different.
+
+**Screenshots:** ready in `docs/screenshots/`, at Apple's exact required sizes:
+
+| Folder | What | Use |
+|---|---|---|
+| `store/iphone-6.9_*.png` (1320×2868) | 5 captioned marketing shots | **6.9" iPhone** screenshot slot, in order 1→5 |
+| `store/ipad-13_*.png` (2752×2064) | 5 captioned marketing shots | **13" iPad** screenshot slot, in order 1→5 |
+| `raw/` | The same shots without captions | Use these instead if you prefer plain gameplay |
+| `iap-review_trading-post.png` | The Trading Post | **Review Screenshot** on each in-app purchase (§5) |
+
+Apple scales the 6.9" and 13" sets down for smaller devices automatically. To regenerate after changing the game: `npm run build && npm run screenshots` (needs Playwright: `npm i -D playwright && npx playwright install chromium`).
 
 ---
 
@@ -150,7 +166,7 @@ Reviews usually take 24–48 hours.
 | 3.1.1: loot boxes must disclose odds | ✅ Not applicable: no paid random rewards |
 | 2.1: in-app purchases must work during review | ⚠️ Make sure the Paid Apps Agreement is active and the IAPs are attached to the version |
 | 4.2: minimum functionality | ✅ Full native game with haptics, offline play and no external links |
-| 5.1.1: privacy policy URL | ⚠️ You must provide one (§7) |
+| 5.1.1: privacy policy URL | ✅ Written (`docs/privacy.html`); ⚠️ publish it and paste the URL (§7) |
 
 ---
 
