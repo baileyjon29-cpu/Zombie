@@ -2,7 +2,7 @@
   "name": "last-haven",
   "private": true,
   "version": "1.1.0",
-  "description": "Last Haven \u2014 a zombie-apocalypse base builder for iOS. Scavenge, build, fortify, and survive the night.",
+  "description": "Last Haven — a zombie-apocalypse base builder for iOS. Scavenge, build, fortify, and survive the night.",
   "type": "module",
   "scripts": {
     "dev": "vite --host",
