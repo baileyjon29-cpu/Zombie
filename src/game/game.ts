@@ -19,6 +19,7 @@ export type GameEvent =
   | { type: 'gameover' }
   | { type: 'dawn' }
   | { type: 'dusk' }
+  | { type: 'horde'; edges: number[] }
   | { type: 'save' }
   | { type: 'victory' }
   | { type: 'quest'; index: number; reward: number; title: string };
@@ -554,6 +555,7 @@ export class Game {
     const blood = s.day % 5 === 0 ? '🩸 BLOOD MOON! ' : '';
     this.toast(`${blood}🧟 Horde of ~${s.spawns.length} coming from the ${from} at nightfall!`, 'warn');
     this.sound('horn');
+    this.emit({ type: 'horde', edges });
   }
 
   private dawn() {

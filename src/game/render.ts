@@ -15,7 +15,10 @@ export interface Overlay {
 }
 
 const T = TILE;
-const GRASS = ['#3d4a2c', '#43512f', '#4a5734'];
+/** terrain base colours (RGB) by terrain code: grass ×3, dirt, road, rubble */
+const BASE_RGB: number[][] = [[58, 74, 40], [66, 84, 44], [76, 92, 50], [96, 78, 52], [52, 54, 58], [82, 76, 66]];
+const FLOWERS = ['#e9d36b', '#e8e2d0', '#c97ab0', '#e08a4a'];
+const SHIRTS = ['#4f5f70', '#74463a', '#676047', '#4b5a3c', '#5e4d63'];
 const ZCOL: Record<ZombieKind, string> = {
   walker: '#6b8f4e', runner: '#93a85c', brute: '#5e4f6e', spitter: '#8aa33a', abomination: '#7a4a5e',
 };
@@ -46,14 +49,31 @@ export class Renderer {
   private dctx: CanvasRenderingContext2D;
   private dpr = 1;
   private groundSeed = -1;
+  private fog: HTMLCanvasElement;
+  private fogCount = -1;
+  private vignette: HTMLCanvasElement;
   w = 0;
   h = 0;
+  /** screen px covered by the HUD at the top and bottom; warnings stay inside this band */
+  safe = { top: 60, bottom: 120 };
+  /** off-screen horde markers drawn this frame (screen px → world tile target) */
+  indicators: { x: number; y: number; wx: number; wy: number }[] = [];
 
   constructor(private canvas: HTMLCanvasElement) {
     this.ctx = canvas.getContext('2d')!;
     this.ground = document.createElement('canvas');
     this.dark = document.createElement('canvas');
     this.dctx = this.dark.getContext('2d')!;
+    this.fog = document.createElement('canvas');
+    this.fog.width = MAP_W;
+    this.fog.height = MAP_H;
+    this.vignette = document.createElement('canvas');
+  }
+
+  /** The off-screen horde marker under a screen point, if any. */
+  hitIndicator(sx: number, sy: number): { x: number; y: number } | null {
+    for (const m of this.indicators) if (Math.hypot(m.x - sx, m.y - sy) < 28) return { x: m.wx, y: m.wy };
+    return null;
   }
 
   resize() {
@@ -67,6 +87,17 @@ export class Renderer {
     // darkness layer at half resolution — it is soft anyway
     this.dark.width = Math.ceil(this.w / 2);
     this.dark.height = Math.ceil(this.h / 2);
+    // soft vignette, cached because it only changes with the screen size
+    const v = this.vignette;
+    v.width = Math.ceil(this.w / 4);
+    v.height = Math.ceil(this.h / 4);
+    const vc = v.getContext('2d')!;
+    const r = Math.hypot(v.width, v.height) / 2;
+    const g = vc.createRadialGradient(v.width / 2, v.height / 2, r * 0.45, v.width / 2, v.height / 2, r);
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(1, 'rgba(0,0,0,0.5)');
+    vc.fillStyle = g;
+    vc.fillRect(0, 0, v.width, v.height);
   }
 
   private buildGround(game: Game) {
@@ -76,34 +107,116 @@ export class Renderer {
     const c = g.getContext('2d')!;
     let seed = game.s.seed;
     const rnd = () => ((seed = (seed * 1664525 + 1013904223) | 0) >>> 0) / 4294967296;
+    const ter = (x: number, y: number) => game.s.terrain[Math.max(0, Math.min(MAP_H - 1, y)) * MAP_W + Math.max(0, Math.min(MAP_W - 1, x))];
+
+    // 1. one pixel per tile, upscaled with smoothing so grass, dirt and rubble blend into each other instead of forming squares
+    const base = document.createElement('canvas');
+    base.width = MAP_W;
+    base.height = MAP_H;
+    const bc = base.getContext('2d')!;
+    const img = bc.createImageData(MAP_W, MAP_H);
     for (let y = 0; y < MAP_H; y++) {
       for (let x = 0; x < MAP_W; x++) {
-        const t = game.s.terrain[y * MAP_W + x];
+        let t = ter(x, y);
+        if (t === 4) t = 1; // roads are painted crisply on top; blend the verge as grass
+        const col = BASE_RGB[t] ?? BASE_RGB[1];
+        const j = (rnd() - 0.5) * 10;
+        const i = (y * MAP_W + x) * 4;
+        img.data[i] = col[0] + j; img.data[i + 1] = col[1] + j; img.data[i + 2] = col[2] + j * 0.6; img.data[i + 3] = 255;
+      }
+    }
+    bc.putImageData(img, 0, 0);
+    c.imageSmoothingEnabled = true;
+    c.imageSmoothingQuality = 'high';
+    c.drawImage(base, 0, 0, MAP_W * T, MAP_H * T);
+
+    // 2. mottling so large areas never look flat
+    for (let i = 0; i < MAP_W * MAP_H * 2; i++) {
+      const dark = rnd() < 0.55;
+      c.fillStyle = dark ? `rgba(20,26,10,${0.05 + rnd() * 0.06})` : `rgba(200,210,150,${0.025 + rnd() * 0.03})`;
+      c.beginPath();
+      c.arc(rnd() * MAP_W * T, rnd() * MAP_H * T, 3 + rnd() * 9, 0, Math.PI * 2);
+      c.fill();
+    }
+
+    // 3. per-tile detail: grass blades, wildflowers, pebbles and rubble
+    for (let y = 0; y < MAP_H; y++) {
+      for (let x = 0; x < MAP_W; x++) {
+        const t = ter(x, y);
         const px = x * T, py = y * T;
-        if (t <= 2) c.fillStyle = GRASS[t];
-        else if (t === 3) c.fillStyle = '#5a4a35';
-        else if (t === 4) c.fillStyle = '#34363a';
-        else c.fillStyle = '#4b4741';
-        c.fillRect(px, py, T, T);
-        // speckle texture
-        for (let i = 0; i < 6; i++) {
-          c.fillStyle = t === 4 ? 'rgba(255,255,255,0.04)' : rnd() < 0.5 ? 'rgba(0,0,0,0.10)' : 'rgba(255,255,255,0.05)';
-          c.fillRect(px + rnd() * T, py + rnd() * T, 2 + rnd() * 3, 2 + rnd() * 3);
-        }
-        if (t <= 2 && rnd() < 0.18) {
-          c.strokeStyle = 'rgba(140,160,90,0.35)';
-          c.lineWidth = 1;
-          const gx = px + rnd() * T, gy = py + rnd() * T;
-          c.beginPath(); c.moveTo(gx, gy); c.lineTo(gx - 2, gy - 5); c.moveTo(gx, gy); c.lineTo(gx + 2, gy - 5); c.stroke();
-        }
-        if (t === 5 && rnd() < 0.6) {
-          c.fillStyle = 'rgba(120,115,105,0.8)';
-          c.fillRect(px + rnd() * T, py + rnd() * T, 3 + rnd() * 5, 3 + rnd() * 4);
+        if (t <= 2) {
+          const blades = Math.floor(rnd() * 3);
+          for (let k = 0; k < blades; k++) {
+            const gx = px + rnd() * T, gy = py + rnd() * T, h = 3 + rnd() * 3;
+            c.strokeStyle = rnd() < 0.5 ? 'rgba(150,175,90,0.22)' : 'rgba(30,45,18,0.25)';
+            c.lineWidth = 1;
+            c.beginPath(); c.moveTo(gx, gy); c.lineTo(gx - 1 - rnd(), gy - h); c.stroke();
+          }
+          if (rnd() < 0.025) {
+            const fx = px + rnd() * T, fy = py + rnd() * T;
+            c.fillStyle = FLOWERS[Math.floor(rnd() * FLOWERS.length)];
+            for (let k = 0; k < 4; k++) { c.beginPath(); c.arc(fx + (rnd() - 0.5) * 9, fy + (rnd() - 0.5) * 9, 1.6, 0, Math.PI * 2); c.fill(); }
+          }
+        } else if (t === 3) {
+          for (let k = 0; k < 3; k++) {
+            const sx = px + rnd() * T, sy = py + rnd() * T, r = 1 + rnd() * 2;
+            c.fillStyle = 'rgba(30,22,14,0.35)';
+            c.beginPath(); c.arc(sx + 0.8, sy + 0.8, r, 0, Math.PI * 2); c.fill();
+            c.fillStyle = 'rgba(150,130,100,0.6)';
+            c.beginPath(); c.arc(sx, sy, r, 0, Math.PI * 2); c.fill();
+          }
+        } else if (t === 5) {
+          for (let k = 0; k < 3; k++) {
+            if (rnd() > 0.7) continue;
+            const sx = px + rnd() * T, sy = py + rnd() * T, w = 3 + rnd() * 6, h = 3 + rnd() * 4;
+            c.fillStyle = 'rgba(20,18,16,0.4)';
+            c.fillRect(sx + 1.5, sy + 1.5, w, h);
+            c.fillStyle = rnd() < 0.5 ? '#7a756b' : '#8a5a44';
+            c.fillRect(sx, sy, w, h);
+            c.fillStyle = 'rgba(255,255,255,0.12)';
+            c.fillRect(sx, sy, w, 1);
+          }
         }
       }
     }
-    // road markings
-    c.strokeStyle = 'rgba(220,200,120,0.35)';
+
+    // 4. roads: crisp asphalt with cracked, gravelly shoulders
+    for (let y = 0; y < MAP_H; y++) {
+      for (let x = 0; x < MAP_W; x++) {
+        if (ter(x, y) !== 4) continue;
+        const px = x * T, py = y * T;
+        c.fillStyle = '#33353a';
+        c.fillRect(px, py, T, T);
+        for (let k = 0; k < 7; k++) {
+          c.fillStyle = rnd() < 0.5 ? 'rgba(255,255,255,0.045)' : 'rgba(0,0,0,0.12)';
+          c.fillRect(px + rnd() * T, py + rnd() * T, 2 + rnd() * 3, 2 + rnd() * 3);
+        }
+        if (rnd() < 0.12) {
+          c.strokeStyle = 'rgba(10,10,12,0.55)'; c.lineWidth = 1;
+          let cx = px + rnd() * T, cy = py + rnd() * T;
+          c.beginPath(); c.moveTo(cx, cy);
+          for (let k = 0; k < 3; k++) { cx += (rnd() - 0.5) * 14; cy += (rnd() - 0.5) * 14; c.lineTo(cx, cy); }
+          c.stroke();
+        }
+        if (rnd() < 0.04) {
+          c.fillStyle = 'rgba(15,15,18,0.7)';
+          c.beginPath(); c.ellipse(px + T / 2, py + T / 2, 5 + rnd() * 4, 3 + rnd() * 3, rnd() * 3, 0, Math.PI * 2); c.fill();
+        }
+        const edge = (nx: number, ny: number, ex: number, ey: number, ew: number, eh: number) => {
+          if (ter(nx, ny) === 4) return;
+          c.fillStyle = 'rgba(15,15,15,0.45)';
+          c.fillRect(ex, ey, ew, eh);
+          c.fillStyle = 'rgba(140,130,110,0.35)';
+          for (let k = 0; k < 4; k++) c.fillRect(ex + rnd() * Math.max(ew, 1) - 1, ey + rnd() * Math.max(eh, 1) - 1, 2, 2);
+        };
+        edge(x, y - 1, px, py, T, 2);
+        edge(x, y + 1, px, py + T - 2, T, 2);
+        edge(x - 1, y, px, py, 2, T);
+        edge(x + 1, y, px + T - 2, py, 2, T);
+      }
+    }
+    // faded centre lines
+    c.strokeStyle = 'rgba(220,200,120,0.32)';
     c.lineWidth = 2;
     c.setLineDash([10, 12]);
     const isRoad = (x: number, y: number) => game.s.terrain[y * MAP_W + x] === 4;
@@ -118,7 +231,57 @@ export class Renderer {
       if (n > MAP_H * 0.6) { c.beginPath(); c.moveTo((x + 1) * T, 0); c.lineTo((x + 1) * T, MAP_H * T); c.stroke(); x++; }
     }
     c.setLineDash([]);
+
+    // 5. darken the map border so the world fades out instead of ending at a hard edge
+    const band = 4 * T, W = MAP_W * T, H = MAP_H * T;
+    const fade = (x0: number, y0: number, x1: number, y1: number, rx: number, ry: number, rw: number, rh: number) => {
+      const lg = c.createLinearGradient(x0, y0, x1, y1);
+      lg.addColorStop(0, 'rgba(8,10,8,0.6)');
+      lg.addColorStop(1, 'rgba(8,10,8,0)');
+      c.fillStyle = lg;
+      c.fillRect(rx, ry, rw, rh);
+    };
+    fade(0, 0, 0, band, 0, 0, W, band);
+    fade(0, H, 0, H - band, 0, H - band, W, band);
+    fade(0, 0, band, 0, 0, 0, band, H);
+    fade(W, 0, W - band, 0, W - band, 0, band, H);
     this.groundSeed = game.s.seed;
+  }
+
+  /** Fog of war as one pixel per tile, drawn with smoothing for soft edges. Rebuilt only when exploration changes. */
+  private updateFog(game: Game) {
+    const ex = game.s.explored;
+    let n = 0;
+    for (let i = 0; i < ex.length; i++) n += ex[i];
+    if (n === this.fogCount) return;
+    this.fogCount = n;
+    const fc = this.fog.getContext('2d')!;
+    const img = fc.createImageData(MAP_W, MAP_H);
+    for (let i = 0; i < ex.length; i++) {
+      img.data[i * 4] = 8; img.data[i * 4 + 1] = 10; img.data[i * 4 + 2] = 8;
+      img.data[i * 4 + 3] = ex[i] ? 0 : 255;
+    }
+    fc.putImageData(img, 0, 0);
+  }
+
+  /** Slow-moving cloud shadows during the day. */
+  private drawClouds(game: Game, now: number, alpha: number) {
+    if (alpha < 0.03) return;
+    const ctx = this.ctx;
+    const W = MAP_W * T, H = MAP_H * T;
+    for (let i = 0; i < 7; i++) {
+      const r = (7 + ((game.s.seed >>> (i * 3)) & 7)) * T;
+      const span = W + r * 4;
+      const cx = (((i * 977 + now * (9 + i)) % span) + span) % span - r * 2;
+      const cy = ((i * 613 + (game.s.seed & 1023)) % H) + Math.sin(now * 0.05 + i) * T;
+      for (const [ox, oy, k] of [[0, 0, 1], [r * 0.7, r * 0.15, 0.75], [-r * 0.6, r * 0.2, 0.65]]) {
+        const g = ctx.createRadialGradient(cx + ox, cy + oy, 0, cx + ox, cy + oy, r * k);
+        g.addColorStop(0, `rgba(10,16,24,${0.13 * alpha})`);
+        g.addColorStop(1, 'rgba(10,16,24,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(cx + ox - r * k, cy + oy - r * k, r * k * 2, r * k * 2);
+      }
+    }
   }
 
   draw(game: Game, cam: Camera, ov: Overlay, now: number, shake: number) {
@@ -217,7 +380,7 @@ export class Renderer {
           ctx.fill();
         }
       } else if (f.kind === 'corpse') {
-        this.drawZombieBody(f.x, f.y, f.text as ZombieKind, f.x2, 0, p < 0.08, Math.max(0, 1 - p) * 0.999);
+        this.drawZombieBody(f.x, f.y, f.text as ZombieKind, f.x2, 0, p < 0.08, Math.max(0, 1 - p) * 0.999, Math.floor(f.x * 7 + f.y * 3));
       } else if (f.kind === 'spark') {
         ctx.fillStyle = `rgba(255,${200 - p * 150},80,${1 - p})`;
         for (let i = 0; i < 4; i++) {
@@ -264,29 +427,29 @@ export class Renderer {
       }
     }
 
-    // fog of war
-    ctx.fillStyle = '#080a08';
-    for (let y = y0; y < y1; y++) {
-      for (let x = x0; x < x1; x++) {
-        if (!game.s.explored[y * MAP_W + x]) ctx.fillRect(x * T - 0.5, y * T - 0.5, T + 1, T + 1);
-      }
-    }
-    // soften fog edge
-    ctx.fillStyle = 'rgba(8,10,8,0.45)';
-    for (let y = y0; y < y1; y++) {
-      for (let x = x0; x < x1; x++) {
-        if (!game.s.explored[y * MAP_W + x]) continue;
-        const e = (xx: number, yy: number) => xx >= 0 && yy >= 0 && xx < MAP_W && yy < MAP_H && !game.s.explored[yy * MAP_W + xx];
-        if (e(x - 1, y) || e(x + 1, y) || e(x, y - 1) || e(x, y + 1)) ctx.fillRect(x * T, y * T, T, T);
-      }
-    }
-
-    // night lighting
+    // smoke from the HQ campfire by day
     const dk = darkness(game);
+    if (dk < 0.3) this.drawSmoke(now, 1 - dk / 0.3);
+    this.drawClouds(game, now, 1 - Math.min(1, dk * 2.5));
+
+    // fog of war: soft-edged instead of tile squares
+    this.updateFog(game);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(this.fog, 0, 0, MAP_W * T, MAP_H * T);
+    ctx.drawImage(this.fog, 0, 0, MAP_W * T, MAP_H * T); // twice: a darker, tighter frontier
+
+    // sunset tint while the horde gathers
+    if (!game.s.isNight && dk > 0.01) {
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = `rgba(255,110,40,${dk * 0.22})`;
+      ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+    }
+    // night lighting
     if (dk > 0.01) this.drawDarkness(game, cam, dk, now);
 
     // overlays that should stay readable at night
     ctx.setTransform(z, 0, 0, z, (-cam.x + sx) * z, (-cam.y + sy) * z);
+    if (dk > 0.05) this.drawEmissive(game, dk, now, inView);
     if (dk > 0.15) this.drawEyes(game, dk, inView);
     this.drawSelection(game, ov, now);
     if (ov.patrolFrom && ov.pointer) {
@@ -307,9 +470,142 @@ export class Renderer {
       ctx.stroke();
     }
 
-    // screen-space: horde direction warnings
+    // screen-space: vignette, horde direction warnings and off-screen markers
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(this.vignette, 0, 0, this.canvas.width, this.canvas.height);
     ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
-    if (game.s.edges.length) this.drawEdgeWarnings(game.s.edges, now);
+    if (game.s.edges.length && !game.s.isNight) this.drawEdgeWarnings(game.s.edges, now);
+    this.drawThreats(game, cam, now);
+  }
+
+  private drawSmoke(now: number, alpha: number) {
+    const ctx = this.ctx;
+    const x = HQ_CX * T, y = HQ_CY * T;
+    for (let i = 0; i < 6; i++) {
+      const p = (now * 0.18 + i / 6) % 1;
+      const r = 4 + p * 14;
+      ctx.fillStyle = `rgba(190,190,180,${0.28 * (1 - p) * alpha})`;
+      ctx.beginPath();
+      ctx.arc(x + Math.sin(now * 0.7 + i * 2) * 6 + p * 22, y - 6 - p * 70, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  /** Things that glow at night: lit windows, tower lamps, campfire embers, gunfire. */
+  private drawEmissive(game: Game, dk: number, now: number, inView: (x: number, y: number, pad?: number) => boolean) {
+    const ctx = this.ctx;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const k = Math.min(1, dk * 1.5);
+    for (const b of game.s.buildings) {
+      if (b.built < 1 || !inView(b.tx, b.ty, 3)) continue;
+      const x = b.tx * T, y = b.ty * T, S = b.size * T;
+      if (b.kind === 'house') {
+        const fl = 0.85 + Math.sin(now * 3 + b.id) * 0.15;
+        for (const [wx, wy] of b.level >= 2 ? [[x + 11, y + 12], [x + S - 15, y + 12]] : [[x + S - 15, y + 12]]) {
+          const g = ctx.createRadialGradient(wx + 2, wy + 3, 0, wx + 2, wy + 3, 18);
+          g.addColorStop(0, `rgba(255,170,70,${0.35 * k * fl})`);
+          g.addColorStop(1, 'rgba(255,170,70,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(wx - 16, wy - 15, 36, 36);
+          ctx.fillStyle = `rgba(255,200,110,${0.9 * k})`;
+          ctx.fillRect(wx, wy, 5, 6);
+        }
+      } else if (b.kind === 'tower') {
+        const g = ctx.createRadialGradient(x + T / 2, y + T / 2 - 9, 0, x + T / 2, y + T / 2 - 9, 26);
+        g.addColorStop(0, `rgba(255,220,140,${0.45 * k})`);
+        g.addColorStop(1, 'rgba(255,220,140,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(x + T / 2 - 26, y + T / 2 - 35, 52, 52);
+      } else if (b.kind === 'hq') {
+        const fl = 1 + Math.sin(now * 11) * 0.08 + Math.sin(now * 27) * 0.05;
+        const cx = x + S / 2, cy = y + S / 2;
+        const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, 46 * fl);
+        g.addColorStop(0, `rgba(255,150,60,${0.55 * k})`);
+        g.addColorStop(1, 'rgba(255,120,40,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(cx - 50, cy - 50, 100, 100);
+        // embers drifting up from the fire
+        for (let i = 0; i < 12; i++) {
+          const p = (now * 0.45 + i / 12) % 1;
+          const ex = cx + Math.sin(i * 12.9 + now * 1.7) * (4 + p * 14);
+          const ey = cy - p * 52;
+          ctx.fillStyle = `rgba(255,${170 - p * 90},60,${(1 - p) * k})`;
+          ctx.fillRect(ex - 1, ey - 1, 2.2, 2.2);
+        }
+      }
+    }
+    for (const f of game.s.fx) {
+      const p = f.t / f.life;
+      if (f.kind === 'tracer') {
+        ctx.strokeStyle = `rgba(255,210,120,${(1 - p) * 0.8 * k})`;
+        ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(f.x * T, f.y * T); ctx.lineTo(f.x2 * T, f.y2 * T); ctx.stroke();
+      } else if (f.kind === 'boom' && f.t >= 0) {
+        const r = (1 + p * 2.5) * T;
+        const g = ctx.createRadialGradient(f.x * T, f.y * T, 0, f.x * T, f.y * T, r);
+        g.addColorStop(0, `rgba(255,170,60,${(1 - p) * 0.7 * k})`);
+        g.addColorStop(1, 'rgba(255,90,20,0)');
+        ctx.fillStyle = g;
+        ctx.fillRect(f.x * T - r, f.y * T - r, r * 2, r * 2);
+      }
+    }
+    ctx.restore();
+  }
+
+  /** At night, red markers on the screen border point at zombies you cannot see. Tap one to jump there. */
+  private drawThreats(game: Game, cam: Camera, now: number) {
+    this.indicators = [];
+    if (!game.s.isNight || !game.s.zombies.length) return;
+    const ctx = this.ctx;
+    const top = this.safe.top + 26, bot = this.h - this.safe.bottom - 26, left = 26, right = this.w - 26;
+    if (bot - top < 80) return;
+    const cx = this.w / 2, cy = (top + bot) / 2;
+    const bins = new Map<number, { n: number; d: number; z: Zombie; a: number }>();
+    for (const zb of game.s.zombies) {
+      const sx = (zb.x * T - cam.x) * cam.zoom, sy = (zb.y * T - cam.y) * cam.zoom;
+      if (sx >= 0 && sx <= this.w && sy >= this.safe.top && sy <= this.h - this.safe.bottom) continue;
+      const a = Math.atan2(sy - cy, sx - cx);
+      const key = ((Math.round(a / (Math.PI / 6)) % 12) + 12) % 12;
+      const d = Math.hypot(zb.x - HQ_CX, zb.y - HQ_CY);
+      const bin = bins.get(key);
+      if (!bin) bins.set(key, { n: 1, d, z: zb, a });
+      else { bin.n++; if (d < bin.d) { bin.d = d; bin.z = zb; bin.a = a; } }
+    }
+    const pulse = 0.75 + Math.sin(now * 6) * 0.25;
+    const marks: { px: number; py: number; n: number; zb: Zombie; a: number; d: number }[] = [];
+    for (const { n, z: zb, a, d } of bins.values()) {
+      const dx = Math.cos(a), dy = Math.sin(a);
+      const tx = dx > 0 ? (right - cx) / dx : dx < 0 ? (left - cx) / dx : Infinity;
+      const ty = dy > 0 ? (bot - cy) / dy : dy < 0 ? (top - cy) / dy : Infinity;
+      const t = Math.min(tx, ty);
+      const px = cx + dx * t, py = cy + dy * t;
+      // markers that would overlap become one marker with the combined count
+      const near = marks.find((m) => Math.hypot(m.px - px, m.py - py) < 40);
+      if (near) { near.n += n; if (d < near.d) { near.d = d; near.zb = zb; } continue; }
+      marks.push({ px, py, n, zb, a, d });
+    }
+    for (const { px, py, n, zb, a } of marks) {
+      this.indicators.push({ x: px, y: py, wx: zb.x, wy: zb.y });
+      ctx.save();
+      ctx.translate(px, py);
+      ctx.fillStyle = 'rgba(0,0,0,0.45)';
+      ctx.beginPath(); ctx.arc(1, 2, 17, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = `rgba(200,36,28,${0.85 * pulse + 0.1})`;
+      ctx.beginPath(); ctx.arc(0, 0, 16, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,200,180,0.8)'; ctx.lineWidth = 1.5; ctx.stroke();
+      ctx.rotate(a);
+      ctx.fillStyle = '#ffd9cf';
+      ctx.beginPath(); ctx.moveTo(24, 0); ctx.lineTo(17, -6); ctx.lineTo(17, 6); ctx.closePath(); ctx.fill();
+      ctx.rotate(-a);
+      ctx.fillStyle = '#fff';
+      ctx.font = 'bold 13px -apple-system, system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText(String(n), 0, 0.5);
+      ctx.textBaseline = 'alphabetic';
+      ctx.restore();
+    }
   }
 
   private drawDarkness(game: Game, cam: Camera, dk: number, now: number) {
@@ -377,21 +673,40 @@ export class Renderer {
     ctx.restore();
   }
 
+  /** Pulsing chevrons + label on the side the horde will come from, kept clear of the HUD. */
   private drawEdgeWarnings(edges: number[], now: number) {
     const ctx = this.ctx;
-    const a = 0.5 + Math.sin(now * 5) * 0.35;
-    ctx.fillStyle = `rgba(230,40,30,${a})`;
-    const w = this.w, h = this.h;
+    const a = 0.55 + Math.sin(now * 5) * 0.35;
+    const top = this.safe.top + 56, bot = Math.max(top, this.h - this.safe.bottom - 56);
+    const midY = (top + bot) / 2;
     for (const e of edges) {
-      for (let i = -1; i <= 1; i++) {
-        ctx.save();
-        if (e === 0) { ctx.translate(w / 2 + i * 26, 64); }
-        else if (e === 2) { ctx.translate(w / 2 + i * 26, h - 96); ctx.rotate(Math.PI); }
-        else if (e === 1) { ctx.translate(w - 22, h / 2 + i * 26); ctx.rotate(Math.PI / 2); }
-        else { ctx.translate(22, h / 2 + i * 26); ctx.rotate(-Math.PI / 2); }
-        ctx.beginPath(); ctx.moveTo(0, -10); ctx.lineTo(10, 6); ctx.lineTo(-10, 6); ctx.closePath(); ctx.fill();
-        ctx.restore();
+      // anchor point and the angle that points at the threatened edge
+      const [px, py, ang] = e === 0 ? [this.w / 2, top, -Math.PI / 2] : e === 2 ? [this.w / 2, bot, Math.PI / 2]
+        : e === 1 ? [this.w - 58, midY, 0] : [58, midY, Math.PI];
+      ctx.save();
+      ctx.translate(px, py);
+      ctx.rotate(ang);
+      ctx.fillStyle = `rgba(235,50,36,${a})`;
+      for (let i = 0; i < 3; i++) {
+        const off = 10 + i * 10 + ((now * 18) % 10);
+        ctx.globalAlpha = 1 - i * 0.28;
+        ctx.beginPath();
+        ctx.moveTo(off + 10, 0); ctx.lineTo(off - 2, -14); ctx.lineTo(off - 2, -8); ctx.lineTo(off + 4, 0); ctx.lineTo(off - 2, 8); ctx.lineTo(off - 2, 14);
+        ctx.closePath(); ctx.fill();
       }
+      ctx.restore();
+      // label pill, always upright, just inside the chevrons
+      const inset = e === 1 || e === 3 ? 38 : 6;
+      const lx = px - Math.cos(ang) * inset, ly = py - Math.sin(ang) * inset;
+      ctx.fillStyle = 'rgba(40,6,6,0.85)';
+      ctx.strokeStyle = `rgba(255,90,70,${a})`;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.roundRect(lx - 34, ly - 10, 68, 20, 10); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#ffd2c8';
+      ctx.font = 'bold 11px -apple-system, system-ui, sans-serif';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillText('HORDE', lx, ly + 0.5);
+      ctx.textBaseline = 'alphabetic';
     }
   }
 
@@ -472,33 +787,74 @@ export class Renderer {
     const x = n.tx * T, y = n.ty * T;
     if (n.kind === 'tree') {
       const greens = ['#2d4a24', '#325227', '#284020', '#37572a'];
-      ctx.fillStyle = 'rgba(0,0,0,0.3)';
-      ctx.beginPath(); ctx.ellipse(x + T * 0.55, y + T * 0.85, T * 0.42, T * 0.16, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = '#4a3420';
-      ctx.fillRect(x + T * 0.44, y + T * 0.5, T * 0.12, T * 0.35);
-      const sway = Math.sin(now * 1.3 + n.tx) * 1;
-      const g = greens[n.variant];
       const sc = 0.75 + 0.25 * (n.amount / n.max);
-      ctx.fillStyle = shade(g, -8);
-      ctx.beginPath(); ctx.arc(x + T * 0.5 + sway, y + T * 0.42, T * 0.4 * sc, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = g;
-      ctx.beginPath(); ctx.arc(x + T * 0.42 + sway, y + T * 0.34, T * 0.28 * sc, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = shade(g, 18);
-      ctx.beginPath(); ctx.arc(x + T * 0.36 + sway, y + T * 0.28, T * 0.12 * sc, 0, Math.PI * 2); ctx.fill();
+      const sway = Math.sin(now * 1.3 + n.tx) * 1;
+      const cx = x + T * 0.5, cy = y + T * 0.4;
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.beginPath(); ctx.ellipse(x + T * 0.62, y + T * 0.86, T * 0.48 * sc, T * 0.18 * sc, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = '#4a3420';
+      ctx.fillRect(x + T * 0.45, y + T * 0.5, T * 0.1, T * 0.34);
+      const g = greens[n.variant];
+      if (n.variant === 3) {
+        // pine: stacked star layers
+        for (let l = 0; l < 3; l++) {
+          const r = T * (0.46 - l * 0.12) * sc;
+          const ly = cy - l * 4;
+          ctx.fillStyle = l === 0 ? shade(g, -22) : shade(g, l * 10);
+          ctx.beginPath();
+          for (let i = 0; i < 14; i++) {
+            const aa = (i / 14) * Math.PI * 2;
+            const rr = i % 2 ? r * 0.62 : r;
+            ctx.lineTo(cx + sway + Math.cos(aa) * rr, ly + Math.sin(aa) * rr);
+          }
+          ctx.closePath(); ctx.fill();
+        }
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 1;
+        ctx.stroke();
+      } else {
+        // broadleaf: dark rim, three overlapping blobs, sunlit top-left
+        const r = T * 0.42 * sc;
+        ctx.fillStyle = shade(g, -26);
+        ctx.beginPath(); ctx.arc(cx + sway, cy + 1, r * 1.04, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = shade(g, -6);
+        ctx.beginPath(); ctx.arc(cx + sway + r * 0.28, cy + r * 0.12, r * 0.7, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx + sway - r * 0.3, cy + r * 0.2, r * 0.66, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(cx + sway - r * 0.12, cy - r * 0.22, r * 0.68, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = shade(g, 20);
+        ctx.beginPath(); ctx.arc(cx + sway - r * 0.3, cy - r * 0.4, r * 0.3, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = shade(g, 34);
+        ctx.beginPath(); ctx.arc(cx + sway - r * 0.38, cy - r * 0.5, r * 0.12, 0, Math.PI * 2); ctx.fill();
+      }
     } else if (n.kind === 'wreck') {
       const cols = ['#7a3b24', '#5c5f63', '#6b5530', '#3e4f5c'];
+      const col = cols[n.variant];
       ctx.save();
       ctx.translate(x + T / 2, y + T / 2);
       ctx.rotate((n.variant - 1.5) * 0.35);
-      ctx.fillStyle = 'rgba(0,0,0,0.3)';
-      ctx.fillRect(-T * 0.42, -T * 0.2, T * 0.9, T * 0.5);
-      ctx.fillStyle = cols[n.variant];
-      ctx.fillRect(-T * 0.45, -T * 0.25, T * 0.9, T * 0.48);
+      const L = T * 0.92, W = T * 0.5;
+      ctx.fillStyle = 'rgba(0,0,0,0.32)';
+      ctx.fillRect(-L / 2 + 3, -W / 2 + 4, L, W);
+      // tyres
+      ctx.fillStyle = '#151515';
+      for (const [wx, wy] of [[-L * 0.32, -W / 2 - 1.5], [L * 0.22, -W / 2 - 1.5], [-L * 0.32, W / 2 - 2.5], [L * 0.22, W / 2 - 2.5]]) ctx.fillRect(wx, wy, 7, 4);
+      // body with rounded corners and an outline
+      ctx.fillStyle = col;
+      ctx.beginPath(); ctx.roundRect(-L / 2, -W / 2, L, W, 4); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1.2; ctx.stroke();
+      // roof and glass
+      ctx.fillStyle = shade(col, -18);
+      ctx.fillRect(-L * 0.18, -W * 0.36, L * 0.4, W * 0.72);
+      ctx.fillStyle = 'rgba(140,170,185,0.55)';
+      ctx.fillRect(L * 0.22, -W * 0.34, L * 0.07, W * 0.68);
       ctx.fillStyle = 'rgba(20,25,30,0.85)';
-      ctx.fillRect(-T * 0.18, -T * 0.2, T * 0.38, T * 0.38);
-      ctx.fillStyle = 'rgba(160,80,30,0.6)';
-      ctx.fillRect(-T * 0.42, -T * 0.22, T * 0.12, T * 0.1);
-      ctx.fillRect(T * 0.2, T * 0.06, T * 0.16, T * 0.12);
+      ctx.fillRect(-L * 0.27, -W * 0.34, L * 0.07, W * 0.68);
+      // sunlit edge and rust
+      ctx.fillStyle = 'rgba(255,255,255,0.14)';
+      ctx.fillRect(-L / 2 + 3, -W / 2 + 1, L - 6, 2);
+      ctx.fillStyle = 'rgba(150,72,28,0.7)';
+      ctx.beginPath(); ctx.arc(-L * 0.38, -W * 0.18, 3.5, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(L * 0.36, W * 0.16, 2.6, 0, Math.PI * 2); ctx.fill();
       ctx.restore();
     } else {
       const looted = n.amount <= 0;
@@ -514,12 +870,24 @@ export class Renderer {
       ctx.fillStyle = 'rgba(30,28,26,0.7)';
       ctx.fillRect(x + T * 0.5, y + T * 0.6, T * 0.5, T * 0.4);
       ctx.fillRect(x + T * 1.1, y + T * 1.1, T * 0.4, T * 0.5);
+      // scattered rubble
+      ctx.fillStyle = '#6b665d';
+      for (let i = 0; i < 5; i++) ctx.fillRect(x + 6 + ((i * 23 + n.tx * 7) % (T * 2 - 14)), y + 8 + ((i * 17 + n.ty * 5) % (T * 2 - 16)), 4, 3);
       if (!looted) {
         const bob = Math.sin(now * 3 + n.tx) * 3;
+        const ring = (now * 0.8 + n.tx * 0.1) % 1;
+        ctx.strokeStyle = `rgba(242,201,76,${0.6 * (1 - ring)})`;
+        ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.arc(x + T, y - 6 + bob, 9 + ring * 10, 0, Math.PI * 2); ctx.stroke();
+        ctx.strokeStyle = 'rgba(242,201,76,0.6)'; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(x + T, y + 3 + bob); ctx.lineTo(x + T, y + T * 0.5); ctx.stroke();
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.beginPath(); ctx.arc(x + T + 1, y - 4 + bob, 10, 0, Math.PI * 2); ctx.fill();
         ctx.fillStyle = '#f2c94c';
         ctx.beginPath();
-        ctx.arc(x + T, y - 6 + bob, 9, 0, Math.PI * 2);
+        ctx.arc(x + T, y - 6 + bob, 9.5, 0, Math.PI * 2);
         ctx.fill();
+        ctx.strokeStyle = '#8a6a14'; ctx.lineWidth = 1.5; ctx.stroke();
         ctx.fillStyle = '#2b2312';
         ctx.font = 'bold 12px system-ui, sans-serif';
         ctx.textAlign = 'center';
@@ -545,11 +913,24 @@ export class Renderer {
         ctx.fillStyle = goldHq ? '#b8943e' : '#62675a';
         ctx.fillRect(x + 12, y + 12, S - 24, S - 24);
         // sandbags
-        ctx.fillStyle = '#9c8a62';
+        // tarp and supply crates on the roof
+        ctx.fillStyle = goldHq ? '#9a7a36' : '#3f5a3a';
+        ctx.fillRect(x + 14, y + 14, S * 0.42, S * 0.3);
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.fillRect(x + 14, y + 14 + S * 0.15, S * 0.42, 2);
+        for (const [cx2, cy2] of [[x + S - 30, y + S - 30], [x + S - 22, y + S - 38]]) {
+          ctx.fillStyle = '#7a5a32'; ctx.fillRect(cx2, cy2, 12, 12);
+          ctx.strokeStyle = '#4a3418'; ctx.lineWidth = 1.5; ctx.strokeRect(cx2, cy2, 12, 12);
+          ctx.beginPath(); ctx.moveTo(cx2, cy2); ctx.lineTo(cx2 + 12, cy2 + 12); ctx.stroke();
+        }
+        ctx.strokeStyle = 'rgba(40,30,15,0.55)'; ctx.lineWidth = 1;
         for (let i = 0; i < 8; i++) {
           const t = (i + 0.5) / 8;
           for (const [bx, by] of [[x + 4 + t * (S - 8), y + 4], [x + 4 + t * (S - 8), y + S - 4], [x + 4, y + 4 + t * (S - 8)], [x + S - 4, y + 4 + t * (S - 8)]]) {
-            ctx.beginPath(); ctx.ellipse(bx, by, 6, 4, 0, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#9c8a62';
+            ctx.beginPath(); ctx.ellipse(bx, by, 6, 4, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+            ctx.fillStyle = 'rgba(255,255,255,0.15)';
+            ctx.beginPath(); ctx.ellipse(bx - 1, by - 1.5, 3.5, 1.5, 0, 0, Math.PI * 2); ctx.fill();
           }
         }
         // hatch + campfire
@@ -597,6 +978,13 @@ export class Renderer {
         ctx.fillStyle = '#a24a36';
         ctx.beginPath(); ctx.moveTo(x + 3, y + 3); ctx.lineTo(x + S / 2, y + S / 2); ctx.lineTo(x + 3, y + S - 3); ctx.closePath(); ctx.fill();
         ctx.beginPath(); ctx.moveTo(x + S - 3, y + 3); ctx.lineTo(x + S / 2, y + S / 2); ctx.lineTo(x + S - 3, y + S - 3); ctx.closePath(); ctx.fill();
+        // roof tiles, ridges and outline
+        ctx.strokeStyle = 'rgba(0,0,0,0.18)'; ctx.lineWidth = 1;
+        for (let i = 1; i < 4; i++) { ctx.beginPath(); ctx.moveTo(x + 3 + i * 6, y + 3 + i * 6); ctx.lineTo(x + S - 3 - i * 6, y + 3 + i * 6); ctx.stroke(); }
+        ctx.strokeStyle = 'rgba(255,220,200,0.25)';
+        ctx.beginPath(); ctx.moveTo(x + 3, y + 3); ctx.lineTo(x + S - 3, y + S - 3); ctx.moveTo(x + S - 3, y + 3); ctx.lineTo(x + 3, y + S - 3); ctx.stroke();
+        ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1.5;
+        ctx.strokeRect(x + 3, y + 3, S - 6, S - 6);
         ctx.fillStyle = '#555';
         ctx.fillRect(x + S - 18, y + 8, 7, 9);
         // boarded planks
@@ -646,6 +1034,10 @@ export class Renderer {
         if (conn(1, 0)) ctx.fillRect(x + T - m, y + m, m, T - 2 * m);
         if (conn(0, -1)) ctx.fillRect(x + m, y, T - 2 * m, m);
         if (conn(0, 1)) ctx.fillRect(x + m, y + T - m, T - 2 * m, m);
+        ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 1;
+        ctx.strokeRect(x + m + 0.5, y + m + 0.5, T - 2 * m - 1, T - 2 * m - 1);
+        ctx.fillStyle = steel ? 'rgba(255,255,255,0.22)' : 'rgba(255,220,170,0.16)';
+        ctx.fillRect(x + m + 1, y + m + 1, T - 2 * m - 2, 2);
         ctx.fillStyle = dark;
         if (steel) {
           ctx.fillRect(x + m + 2, y + m + 2, 3, 3);
@@ -717,6 +1109,14 @@ export class Renderer {
         ctx.fillRect(x + 3, y + 3, (S - 6) / 2, S - 6);
         ctx.strokeStyle = '#3a4226'; ctx.lineWidth = 3;
         ctx.beginPath(); ctx.moveTo(x + S / 2, y + 3); ctx.lineTo(x + S / 2, y + S - 3); ctx.stroke();
+        // canvas seams, guy lines and outline
+        ctx.strokeStyle = 'rgba(0,0,0,0.18)'; ctx.lineWidth = 1;
+        for (let i = 1; i < 4; i++) { ctx.beginPath(); ctx.moveTo(x + 3, y + 3 + i * (S - 6) / 4); ctx.lineTo(x + S - 3, y + 3 + i * (S - 6) / 4); ctx.stroke(); }
+        ctx.strokeStyle = 'rgba(220,210,170,0.45)';
+        ctx.beginPath(); ctx.moveTo(x + 3, y + 3); ctx.lineTo(x - 3, y - 3); ctx.moveTo(x + S - 3, y + 3); ctx.lineTo(x + S + 3, y - 3);
+        ctx.moveTo(x + 3, y + S - 3); ctx.lineTo(x - 3, y + S + 3); ctx.moveTo(x + S - 3, y + S - 3); ctx.lineTo(x + S + 3, y + S + 3); ctx.stroke();
+        ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1.5;
+        ctx.strokeRect(x + 3, y + 3, S - 6, S - 6);
         ctx.fillStyle = '#e8d36b';
         const cx = x + S / 2, cy = y + S / 2;
         ctx.beginPath();
@@ -768,21 +1168,36 @@ export class Renderer {
     ctx.beginPath(); ctx.ellipse(x, y + 7, 8, 4, 0, 0, Math.PI * 2); ctx.fill();
     const body = u.kind === 'worker' ? '#3f6ea8' : u.kind === 'guard' ? '#4b6b3a' : '#2a2a2a';
     const r = u.kind === 'merc' ? 9 : 8;
-    ctx.fillStyle = u.hurt > 0 ? '#ff6b5a' : body;
-    ctx.beginPath(); ctx.arc(x, y - bob, r, 0, Math.PI * 2); ctx.fill();
-    // weapon
+    const cy = y - bob;
+    // weapon under the body so the shoulders overlap it
     if (u.kind !== 'worker') {
-      ctx.strokeStyle = '#1a1a1a'; ctx.lineWidth = 3;
-      ctx.beginPath(); ctx.moveTo(x, y - bob); ctx.lineTo(x + Math.cos(u.aim) * 15, y - bob + Math.sin(u.aim) * 15); ctx.stroke();
+      ctx.strokeStyle = '#141414'; ctx.lineWidth = 3.2; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(x + Math.cos(u.aim) * 3, cy + Math.sin(u.aim) * 3); ctx.lineTo(x + Math.cos(u.aim) * 16, cy + Math.sin(u.aim) * 16); ctx.stroke();
+      ctx.lineCap = 'butt';
+    }
+    ctx.fillStyle = u.hurt > 0 ? '#ff6b5a' : body;
+    ctx.beginPath(); ctx.arc(x, cy, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.6)'; ctx.lineWidth = 1.5; ctx.stroke();
+    // light from the top-left
+    ctx.fillStyle = 'rgba(255,255,255,0.16)';
+    ctx.beginPath(); ctx.arc(x - r * 0.3, cy - r * 0.35, r * 0.5, 0, Math.PI * 2); ctx.fill();
+    // backpack for workers, vest strap for fighters
+    if (u.kind === 'worker') {
+      ctx.fillStyle = shade(body, -35);
+      ctx.fillRect(x - 4, cy + 1, 8, 5);
+    } else {
+      ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x - r * 0.7, cy - r * 0.5); ctx.lineTo(x + r * 0.6, cy + r * 0.6); ctx.stroke();
     }
     // head
     ctx.fillStyle = '#e0b48a';
-    ctx.beginPath(); ctx.arc(x, y - bob - 3, 4.5, 0, Math.PI * 2); ctx.fill();
-    if (u.kind === 'guard') { ctx.fillStyle = '#3a5229'; ctx.beginPath(); ctx.arc(x, y - bob - 4.5, 5, Math.PI, 0); ctx.fill(); }
-    if (u.kind === 'merc') { ctx.fillStyle = '#b02a2a'; ctx.beginPath(); ctx.ellipse(x - 1, y - bob - 6, 5.5, 3, -0.3, 0, Math.PI * 2); ctx.fill(); }
+    ctx.beginPath(); ctx.arc(x, cy - 3, 4.5, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(60,30,10,0.55)'; ctx.lineWidth = 1; ctx.stroke();
+    if (u.kind === 'guard') { ctx.fillStyle = '#3a5229'; ctx.beginPath(); ctx.arc(x, cy - 4.5, 5, Math.PI, 0); ctx.fill(); }
+    if (u.kind === 'merc') { ctx.fillStyle = '#b02a2a'; ctx.beginPath(); ctx.ellipse(x - 1, cy - 6, 5.5, 3, -0.3, 0, Math.PI * 2); ctx.fill(); }
     if (u.kind === 'worker' && u.job !== 'idle') {
       ctx.fillStyle = u.job === 'wood' ? '#c98b4a' : u.job === 'scrap' ? '#9aa4ad' : '#8fc35a';
-      ctx.beginPath(); ctx.arc(x, y - bob - 5.5, 3.2, Math.PI, 0); ctx.fill();
+      ctx.beginPath(); ctx.arc(x, cy - 5.5, 3.2, Math.PI, 0); ctx.fill();
     }
     // carried goods
     if (u.carry > 0 || u.loot) {
@@ -801,18 +1216,20 @@ export class Renderer {
   }
 
   private drawZombie(z: Zombie) {
-    this.drawZombieBody(z.x, z.y, z.kind, z.dir, z.wobble, z.flash > 0, 1);
+    this.drawZombieBody(z.x, z.y, z.kind, z.dir, z.wobble, z.flash > 0, 1, z.id);
     const r = ZOMBIES[z.kind].radius * T * 0.85;
     if (z.hp < z.maxHp) this.hpBar(z.x * T - r, z.y * T - r - 9, r * 2, z.hp / z.maxHp);
   }
 
   /** Shared by live zombies and dying corpses. `fall` goes 1 → 0 as a corpse collapses. */
-  private drawZombieBody(zx: number, zy: number, kind: ZombieKind, ad: number, wobble: number, flash: boolean, fall: number) {
+  private drawZombieBody(zx: number, zy: number, kind: ZombieKind, ad: number, wobble: number, flash: boolean, fall: number, variant = 0) {
     const ctx = this.ctx;
     const def = ZOMBIES[kind];
     const x = zx * T, y = zy * T;
     const r = def.radius * T * 0.85;
     const col = ZCOL[kind];
+    // walkers and runners still wear torn clothes; the mutated ones are all skin
+    const shirt = kind === 'walker' || kind === 'runner' ? SHIRTS[Math.abs(variant) % SHIRTS.length] : col;
     const sway = Math.sin(wobble) * 0.25;
     ctx.fillStyle = 'rgba(0,0,0,0.3)';
     ctx.beginPath(); ctx.ellipse(x, y + r * 0.8, r * 1.05, r * 0.45, 0, 0, Math.PI * 2); ctx.fill();
@@ -823,7 +1240,7 @@ export class Renderer {
       ctx.translate(x, y + (1 - fall) * r * 0.5);
       ctx.rotate(ad + Math.PI / 2 * (1 - fall));
       ctx.scale(1, 0.35 + 0.65 * fall);
-      ctx.fillStyle = shade(col, -20);
+      ctx.fillStyle = shade(shirt, -20);
       ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
       ctx.fillStyle = shade(col, -45);
       ctx.beginPath(); ctx.arc(r * 0.4, 0, r * 0.55, 0, Math.PI * 2); ctx.fill();
@@ -854,8 +1271,16 @@ export class Renderer {
       ctx.stroke();
     }
     ctx.lineCap = 'butt';
-    ctx.fillStyle = flash ? '#ffffff' : col;
+    ctx.fillStyle = flash ? '#ffffff' : shirt;
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = 1.5; ctx.stroke();
+    if (!flash && shirt !== col) {
+      // rips in the shirt show grey-green skin
+      ctx.fillStyle = shade(col, -10);
+      ctx.beginPath(); ctx.arc(x - fx * r * 0.35 + sx * r * 0.4, y - fy * r * 0.35 + sy * r * 0.4, r * 0.26, 0, Math.PI * 2); ctx.fill();
+    }
+    ctx.fillStyle = 'rgba(255,255,255,0.1)';
+    ctx.beginPath(); ctx.arc(x - r * 0.3, y - r * 0.35, r * 0.45, 0, Math.PI * 2); ctx.fill();
     if (kind === 'spitter' && !flash) {
       // bloated acid sacs
       ctx.fillStyle = '#c8e04a';
@@ -877,8 +1302,9 @@ export class Renderer {
       ctx.fillStyle = 'rgba(120,20,30,0.7)';
       ctx.beginPath(); ctx.arc(x - fx * r * 0.2 + sx * r * 0.35, y - fy * r * 0.2 + sy * r * 0.35, r * 0.25, 0, Math.PI * 2); ctx.fill();
     }
-    ctx.fillStyle = flash ? '#fff' : shade(col, -30);
+    ctx.fillStyle = flash ? '#fff' : shade(col, -12);
     ctx.beginPath(); ctx.arc(x + fx * r * 0.25, y + fy * r * 0.25 - 2, r * 0.55, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = 1; ctx.stroke();
     ctx.fillStyle = kind === 'abomination' ? '#ff5a3a' : '#ffdf5a';
     const ex = x + fx * r * 0.5, ey = y + fy * r * 0.5 - 2;
     const e = kind === 'abomination' ? 4 : 2.2;

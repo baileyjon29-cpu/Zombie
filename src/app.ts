@@ -45,7 +45,8 @@ export class App {
   mode: Mode = 'none';
   buildKind: BuildingKind = 'wall';
   tab: Tab = 'build';
-  trayOpen = true;
+  /** phones start with the tray closed so the map is visible; the pulsing tab invites the first tap */
+  trayOpen = window.innerWidth > 520;
   selected: Sel = null;
   pointer: { x: number; y: number } | null = null;
   ghost: Overlay['ghost'] = null;
@@ -62,6 +63,10 @@ export class App {
   private html = new Map<string, string>();
   private ui: HTMLElement;
   private modalStack: string[] = [];
+  /** smooth camera pan target (camera x/y), cancelled as soon as the player touches the map */
+  private camGoal: { x: number; y: number } | null = null;
+  private questSeen = { index: -1, at: 0 };
+  private questOpen = false;
 
   constructor(private canvas: HTMLCanvasElement, root: HTMLElement) {
     this.ui = root;
@@ -184,6 +189,12 @@ export class App {
       }
     }
     this.handleEvents();
+    if (this.camGoal) {
+      const k = Math.min(1, raw * 5);
+      this.cam.x += (this.camGoal.x - this.cam.x) * k;
+      this.cam.y += (this.camGoal.y - this.cam.y) * k;
+      if (Math.hypot(this.camGoal.x - this.cam.x, this.camGoal.y - this.cam.y) < 1) this.camGoal = null;
+    }
     this.shake = Math.max(0, this.shake - raw * 40);
     this.renderer.draw(this.game, this.cam, this.overlay(), t / 1000, this.shake);
     this.hudTimer -= raw;
@@ -228,6 +239,13 @@ export class App {
         case 'victory': this.profile.wins++; saveProfile(this.profile); this.showVictory(); break;
         case 'shake': this.shake = Math.max(this.shake, e.amount); if (e.amount > 10) this.haptic('heavy'); break;
         case 'dusk': this.haptic('warning'); break;
+        case 'horde': {
+          // show the player the side that is about to be hit, unless they are busy placing something
+          if (this.mode !== 'none' || this.paused) break;
+          const [dx, dy] = [[0, -1], [1, 0], [0, 1], [-1, 0]][e.edges[0]];
+          this.panTo(HQ_CX + dx * 7, HQ_CY + dy * 7);
+          break;
+        }
         case 'dawn': this.recordBest(); break;
         case 'save': this.save(); break;
         case 'gameover': this.recordBest(); saveRun(null); this.showGameOver(); break;
@@ -256,6 +274,18 @@ export class App {
     this.cam.x = tx * T - this.renderer.w / this.cam.zoom / 2;
     this.cam.y = ty * T - this.renderer.h / this.cam.zoom / 2;
     this.clampCam();
+  }
+
+  /** Smoothly move the camera so a world tile sits in the middle of the area not covered by the HUD. */
+  panTo(tx: number, ty: number) {
+    const { top, bottom } = this.renderer.safe;
+    const midY = (top + this.renderer.h - bottom) / 2;
+    const goal = { x: tx * T - this.renderer.w / this.cam.zoom / 2, y: ty * T - midY / this.cam.zoom };
+    const saved = { ...this.cam };
+    this.cam.x = goal.x; this.cam.y = goal.y;
+    this.clampCam();
+    this.camGoal = { x: this.cam.x, y: this.cam.y };
+    this.cam.x = saved.x; this.cam.y = saved.y;
   }
 
   clampCam() {
@@ -291,6 +321,7 @@ export class App {
 
     c.addEventListener('pointerdown', (e) => {
       this.sfx.unlock();
+      this.camGoal = null;
       c.setPointerCapture(e.pointerId);
       pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (pts.size === 1) {
@@ -349,8 +380,12 @@ export class App {
       if (pts.size > 0) return;
       if (painting) { painting = false; this.lastPaint = null; return; }
       if (!moved && e.type === 'pointerup') {
-        const w = this.toWorld(e.clientX, e.clientY);
-        this.tap(w.x, w.y);
+        const hit = this.mode === 'none' ? this.renderer.hitIndicator(e.clientX, e.clientY) : null;
+        if (hit) { this.panTo(hit.x, hit.y); this.sfx.play('click'); }
+        else {
+          const w = this.toWorld(e.clientX, e.clientY);
+          this.tap(w.x, w.y);
+        }
       }
       if (e.pointerType !== 'mouse' && this.mode !== 'build') this.pointer = null;
     };
@@ -454,7 +489,11 @@ export class App {
       else {
         const n = g.isExplored(tx, ty) ? g.nodeAt(tx, ty) : undefined;
         if (n) this.select({ type: 'node', id: n.id });
-        else this.select(null);
+        else {
+          // tapping open ground on a phone tucks the tray away to show more of the map
+          if (!this.selected && window.innerWidth <= 520) this.trayOpen = false;
+          this.select(null);
+        }
       }
     }
   }
@@ -508,6 +547,7 @@ export class App {
       <div class="boss hidden" id="boss"></div>
       <div class="quest" id="quest" data-a="quest"></div>
       <div class="toasts" id="toasts"></div>
+      <button class="threat hidden" id="threat" data-a="threat" aria-label="Go to the fight"></button>
       <div class="bottom">
         <div class="event" id="event"></div>
         <div class="panel" id="panel"></div>
@@ -566,7 +606,28 @@ export class App {
     const q = QUESTS[s.questIndex];
     const claimed = q ? this.profile.claimedQuests.includes(s.questIndex) : false;
     this.set('quest', q ? `<b>${ico('target')} ${esc(q.title)}</b><span>${esc(q.hint)}</span><em>${claimed ? '✓' : `${CAP}${q.reward}`}</em>` : '');
-    document.getElementById('quest')?.classList.toggle('hidden', !q || s.zombies.some((z) => z.kind === 'abomination'));
+    const questEl = document.getElementById('quest');
+    questEl?.classList.toggle('hidden', !q || s.zombies.some((z) => z.kind === 'abomination'));
+    // a new goal shows its hint for a few seconds, then folds to one line on small screens (tap to unfold)
+    const nowS = performance.now() / 1000;
+    if (this.questSeen.index !== s.questIndex) { this.questSeen = { index: s.questIndex, at: nowS }; this.questOpen = false; }
+    questEl?.classList.toggle('compact', !this.questOpen && nowS - this.questSeen.at > 7);
+
+    const threat = document.getElementById('threat');
+    if (threat) {
+      const n = s.isNight ? s.zombies.length : 0;
+      threat.classList.toggle('hidden', n === 0 || !this.started);
+      this.set('threat', `${ico('zombie')}<b>${n}</b>`);
+    }
+    // keep canvas warnings inside the strip of map the HUD does not cover
+    const topEl = this.ui.querySelector('.top'), botEl = this.ui.querySelector('.bottom');
+    if (topEl && botEl) {
+      const qb = questEl && !questEl.classList.contains('hidden') ? questEl.getBoundingClientRect().bottom : 0;
+      this.renderer.safe = {
+        top: Math.max(topEl.getBoundingClientRect().bottom, window.innerWidth <= 520 ? qb : 0),
+        bottom: window.innerHeight - botEl.getBoundingClientRect().top,
+      };
+    }
 
     // boss health bar
     const boss = s.zombies.find((z) => z.kind === 'abomination' && z.hp > 0);
@@ -728,7 +789,19 @@ export class App {
         this.selected = null;
         this.sfx.play('click');
         break;
-      case 'home': this.centerOn(HQ_CX, HQ_CY); this.sfx.play('click'); break;
+      case 'home': this.panTo(HQ_CX, HQ_CY); this.sfx.play('click'); break;
+      case 'threat': {
+        // jump to the zombie closest to the HQ: that is where the fight is
+        let best = null as { x: number; y: number } | null, bd = Infinity;
+        for (const z of g.s.zombies) {
+          // prefer zombies the player can actually see
+          const d = Math.hypot(z.x - HQ_CX, z.y - HQ_CY) + (g.isExplored(Math.floor(z.x), Math.floor(z.y)) ? 0 : 1000);
+          if (d < bd) { bd = d; best = z; }
+        }
+        if (best) this.panTo(best.x, best.y);
+        this.sfx.play('click');
+        break;
+      }
       case 'build': {
         const k = v as BuildingKind;
         const d = BUILDINGS[k];
@@ -800,7 +873,7 @@ export class App {
         break;
       case 'shop': this.openShop(); break;
       case 'menu': this.openMenu(); break;
-      case 'quest': break;
+      case 'quest': this.questOpen = !this.questOpen; break;
       // modal actions
       case 'close': this.closeModal(); break;
       case 'buy': void this.buy(v); break;
@@ -902,13 +975,13 @@ export class App {
     this.modal('howto', `
       <h2>How to survive</h2>
       <ul class="howto">
-        <li><b>☀️ Day:</b> Put survivors to work in <b>👷 Jobs</b> — chop wood, strip wrecks for scrap, farm food.</li>
-        <li><b>🏚 Scavenge:</b> Tap ruins (gold markers) and send a scavenger for big loot, new survivors and Caps.</li>
-        <li><b>🧱 Fortify:</b> Drag to paint walls around your Haven. Zombies chew through the weakest spot.</li>
-        <li><b>🗼 Defend:</b> Watchtowers shoot automatically. Train guards at the Barracks and set them to post or patrol.</li>
-        <li><b>🌙 Night:</b> Survivors hide in the HQ. The horde comes from the direction shown by red arrows.</li>
-        <li><b>🥫 Dawn:</b> Everyone eats. Keep food up and new survivors will find you.</li>
-        <li><b>🏚 HQ:</b> If your HQ falls, the run is over.</li>
+        <li>${ico('sun')}<span><b>Day:</b> Put survivors to work in <b>Jobs</b>: chop wood, strip wrecks for scrap, farm food.</span></li>
+        <li>${ico('ruin')}<span><b>Scavenge:</b> Tap ruins (gold markers) and send a scavenger for big loot, new survivors and Caps.</span></li>
+        <li>${ico('wall')}<span><b>Fortify:</b> Drag to paint walls around your Haven. Zombies chew through the weakest spot.</span></li>
+        <li>${ico('tower')}<span><b>Defend:</b> Watchtowers shoot automatically. Train guards at the Barracks and set them to post or patrol.</span></li>
+        <li>${ico('moon')}<span><b>Night:</b> Survivors hide in the HQ. Red <b>HORDE</b> arrows show where the attack comes from. Tap a red marker on the screen edge to jump to the fight.</span></li>
+        <li>${ico('food')}<span><b>Dawn:</b> Everyone eats. Keep food up and new survivors will find you.</span></li>
+        <li>${ico('home')}<span><b>HQ:</b> If your HQ falls, the run is over.</span></li>
       </ul>
       <p class="muted">Pinch or scroll to zoom · drag to look around · tap to select.</p>
       <div class="row"><button class="btn gold big" data-a="continue">Let's go</button></div>`);

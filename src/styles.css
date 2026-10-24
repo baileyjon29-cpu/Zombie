@@ -308,3 +308,44 @@ button:disabled { opacity: 0.45; cursor: default; }
   .sel { padding: 6px 10px; }
   .card .nm { font-size: 10.5px; }
 }
+
+/* ---------- night: jump to the fight ---------- */
+.threat {
+  position: absolute; right: calc(var(--sar) + 10px); top: calc(var(--sat) + 52px); z-index: 4;
+  display: inline-flex; align-items: center; gap: 5px; padding: 8px 12px 8px 10px; border-radius: 999px;
+  background: linear-gradient(#c8342a, #8f1f18); border: 1px solid #ff8a76; color: #fff; font-weight: 800; font-size: 15px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5), 0 0 0 0 rgba(229, 72, 58, 0.6); animation: threat 1.6s ease-in-out infinite;
+}
+.threat .ico { width: 22px; height: 22px; }
+.threat:active { transform: scale(0.94); }
+@keyframes threat { 60% { box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5), 0 0 0 10px rgba(229, 72, 58, 0); } }
+@media (max-width: 520px) { .threat { top: calc(var(--sat) + 84px); padding: 6px 10px 6px 8px; font-size: 14px; } }
+
+/* ---------- goal card folds to one line on small screens ---------- */
+.quest { transition: padding 0.2s; cursor: pointer; }
+@media (max-width: 520px), (max-height: 500px) {
+  .quest.compact { padding: 4px 10px 4px 8px; }
+  .quest.compact span { display: none; }
+  .quest.compact em { grid-row: 1; }
+}
+
+/* ---------- how-to rows with drawn icons ---------- */
+.howto li { display: flex; gap: 10px; align-items: flex-start; }
+.howto li > .ico { width: 24px; height: 24px; flex: 0 0 24px; margin-top: 1px; }
+
+/* ---------- phones: slimmer build cards, more battlefield ---------- */
+@media (max-width: 520px) {
+  .card { width: 74px; padding: 6px 3px 5px; border-radius: 12px; }
+  .card .ic .ico { width: 26px; height: 26px; }
+  .card.power { width: 96px; }
+  .tabs button { padding: 3px 6px; }
+  .tabs button .ico { width: 22px; height: 22px; }
+}
+
+/* ---------- richer HUD surfaces ---------- */
+.chip, .daypill, .iconbtn, .tabs, .quest, .sel, .card, .jobs {
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+}
+.logo { background: none; animation: flicker 6s infinite; }
+@keyframes flicker { 0%, 92%, 100% { opacity: 1; } 93% { opacity: 0.6; } 94% { opacity: 1; } 96% { opacity: 0.75; } }
